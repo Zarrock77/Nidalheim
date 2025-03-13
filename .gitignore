@@ -10,7 +10,9 @@ Build/
 *.suo
 *.VC.db
 *.vscode/
+*.vs/
 .vscode/
+.vs/
 *.xcodeproj
 *.xcworkspace
 *.DS_Store
