@@ -1,5 +1,3 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
 #pragma once
 
 #include "CoreMinimal.h"
@@ -8,27 +6,29 @@
 #include "WebSocketsModule.h"
 #include "NPC.generated.h"
 
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnMessageReceivedSignature, const FString&, Message);
+
 /**
  * 
  */
 UCLASS(Blueprintable)
 class NIDALHEIM_API UNPC : public UObject
 {
-	GENERATED_BODY()
+    GENERATED_BODY()
 
 public:
-	UNPC();
+    UNPC();
 
-	UFUNCTION(BlueprintCallable)
-	void SendMessageToNPC(FString message);
+    UFUNCTION(BlueprintCallable)
+    void SendMessageToNPC(FString message);
 
-    // UFUNCTION(BlueprintImplementableEvent)
-	// void OnMessageReceivedFromNPC(FString message);
+    UPROPERTY(BlueprintAssignable)
+    FOnMessageReceivedSignature OnMessageReceivedDelegate;
 
 private:
-	TSharedPtr<IWebSocket> WebSocket;
+    TSharedPtr<IWebSocket> WebSocket;
 
     void OnConnected();
     void OnConnectionError(const FString& Error);
-    void OnMessageReceived(const FString& Message);
+    void HandleMessageReceived(const FString& Message);
 };

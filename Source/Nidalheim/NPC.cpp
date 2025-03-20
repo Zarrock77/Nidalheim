@@ -1,6 +1,3 @@
-// Fill out your copyright notice in the Description page of Project Settings.
-
-
 #include "NPC.h"
 
 DEFINE_LOG_CATEGORY_STATIC(UNPCSub, Log, All);
@@ -17,7 +14,7 @@ UNPC::UNPC()
 
     WebSocket->OnConnected().AddUObject(this, &UNPC::OnConnected);
     WebSocket->OnConnectionError().AddUObject(this, &UNPC::OnConnectionError);
-    WebSocket->OnMessage().AddUObject(this, &UNPC::OnMessageReceived);
+    WebSocket->OnMessage().AddUObject(this, &UNPC::HandleMessageReceived);
 
     WebSocket->Connect();
 }
@@ -43,8 +40,8 @@ void UNPC::OnConnectionError(const FString& Error)
     UE_LOG(LogTemp, Error, TEXT("Erreur de connexion WebSocket : %s"), *Error);
 }
 
-void UNPC::OnMessageReceived(const FString& Message)
+void UNPC::HandleMessageReceived(const FString& Message)
 {
     UE_LOG(LogTemp, Warning, TEXT("Message reçu : %s"), *Message);
-    // OnMessageReceivedFromNPC(Message);
+    OnMessageReceivedDelegate.Broadcast(Message);
 }
