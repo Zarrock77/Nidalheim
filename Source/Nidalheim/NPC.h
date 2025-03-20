@@ -15,6 +15,8 @@ class NIDALHEIM_API UNPC : public UObject
 	GENERATED_BODY()
 
 public:
+	UNPC();
+
 	UFUNCTION(BlueprintCallable)
-	void SendMessageToNPC(int valueTest);
+	void SendMessageToNPC(FString message);
 };

@@ -5,7 +5,12 @@
 
 DEFINE_LOG_CATEGORY_STATIC(UNPCSub, Log, All);
 
-void UNPC::SendMessageToNPC(int valueTest)
+UNPC::UNPC()
 {
-    UE_LOG(UNPCSub, Warning, TEXT("Hello, world"));
+    UE_LOG(UNPCSub, Warning, TEXT("CREATED ONE TIME HERE!!!"));
+}
+
+void UNPC::SendMessageToNPC(FString message)
+{
+    UE_LOG(UNPCSub, Warning, TEXT("The user sent to the NPC the message: %s"), *message);
 }
