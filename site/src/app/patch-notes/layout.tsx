@@ -3,9 +3,5 @@ export default function PatchNotesLayout({
 }: {
   children: React.ReactNode;
 }) {
-  return (
-    <>
-      <div className="mt-24">{children}</div>
-    </>
-  );
+  return <div className="min-h-screen py-24 px-6">{children}</div>;
 }
