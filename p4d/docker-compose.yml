@@ -1,0 +1,25 @@
+services:
+  p4d:
+    container_name: "p4d"
+    build:
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    hostname: perforce
+    environment:
+      - P4PORT=ssl:1666
+      - P4NAME=perforceserver
+    volumes:
+      - "serverdata:/metadata"
+      - "serverlibrary:/library"
+      - "serverjournals:/journals"
+      - "servercheckpoints:/checkpoints"
+      - "ssl:/ssl"
+    ports:
+      - 1666:1666
+
+volumes:
+  serverdata:
+  serverlibrary:
+  servercheckpoints:
+  serverjournals:
+  ssl:
