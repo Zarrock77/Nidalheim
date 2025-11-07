@@ -22,7 +22,7 @@ RUN chown $DOCKER_USER:$DOCKER_USER /docker-entrypoint.sh
 
 RUN mkdir /metadata && mkdir /library && mkdir /journals && mkdir /backup && mkdir /ssl
 RUN chown $DOCKER_USER:$DOCKER_USER /metadata /library /journals /backup /ssl
-RUN chmod 700
+RUN chmod 700 /metadata /library /journals /backup /ssl
 
 USER $DOCKER_USER
 
