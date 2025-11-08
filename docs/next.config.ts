@@ -14,4 +14,5 @@ export default withNextra({
       "next-mdx-import-source-file": "./src/lib/mdx-components.tsx",
     },
   },
+  output: "standalone",
 });
