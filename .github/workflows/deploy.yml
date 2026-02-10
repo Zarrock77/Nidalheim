@@ -24,5 +24,7 @@ jobs:
             rm -rf .env
             echo "NEXT_PUBLIC_SUPABASE_URL=${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}" > .env
             echo "NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}" >> .env
+            echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> .env
+            echo "NIDALHEIM_API_KEY=${{ secrets.NIDALHEIM_API_KEY }}" >> .env
             docker compose pull
             docker compose up -d

@@ -21,6 +21,18 @@ services:
     networks:
       - nidalheim-network
 
+  nidalheim-api:
+    image: zarrockdle/api:latest
+    container_name: nidalheim-api
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - WS_UUID=${WS_UUID}
+      - PORT=3002
+    networks:
+      - nidalheim-network
+
   nginx:
     image: nginx:stable-alpine
     container_name: nginx
@@ -34,6 +46,7 @@ services:
     depends_on:
       - nidalheim-site
       - nidalheim-docs
+      - nidalheim-api
 
 networks:
   nidalheim-network:
