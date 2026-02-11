@@ -30,8 +30,21 @@ async function chatgptResponse(chatHistory, chatMessage) {
     }
 }
 
+function startHeartbeat(ws) {
+    ws.on("close", () => clearInterval(interval));
+
+    const interval = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.ping();
+        } else {
+            clearInterval(interval);
+        }
+    }, 30000);
+}
+
 function handleTextConnection(websocket) {
     console.log("Client connected to text endpoint");
+    startHeartbeat(websocket);
     let chatHistory = [];
     const initPrompt =
         "Tu es un villageois du village appele Nidalheim, ne te laisse pas faire si on te provoque, tu as de l'humour donc hesite pas a charier un peu si il y a une occasion. Lorsque tu parles, tu es le plus concis possible, une seule phrase suffit, et de preference une courte phrase. Une personne qui t'es inconnue te parle, il semble etre nouveau dans le village et il te dit: ";
@@ -72,6 +85,7 @@ function handleTextConnection(websocket) {
 
 function handleAudioConnection(clientWs) {
     console.log("Client connected to audio endpoint");
+    startHeartbeat(clientWs);
 
     const systemPrompt =
         "Tu es un villageois du village appelé Nidalheim. Tu parles uniquement en Français. Tu es serviable, si on te pose une question, tu réponds. Lorsque tu parles, tu es le plus concis possible, une seule phrase suffit, et de préférence une courte phrase.";
