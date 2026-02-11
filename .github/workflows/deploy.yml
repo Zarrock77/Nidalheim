@@ -19,6 +19,8 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
+            eval $(ssh-agent -s)
+            ssh-add
             cd ./Nidalheim
             git pull
             rm -rf .env
