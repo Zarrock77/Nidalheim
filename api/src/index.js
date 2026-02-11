@@ -320,24 +320,29 @@ function main() {
         process.exit(1);
     }
 
-    const websocketPath = `/${nidalheimAPIKey}`;
-
     const server = http.createServer();
     const wss = new WebSocketServer({ noServer: true });
 
     server.on("upgrade", (request, socket, head) => {
-        const requestUrl = request.url;
+        const url = new URL(request.url, `http://${request.headers.host}`);
+        const apiKey = url.searchParams.get("api_key");
 
-        if (requestUrl === `${websocketPath}/text`) {
+        if (apiKey !== nidalheimAPIKey) {
+            console.log("Connection refused: invalid api_key");
+            socket.destroy();
+            return;
+        }
+
+        if (url.pathname === "/text") {
             wss.handleUpgrade(request, socket, head, (ws) => {
                 handleTextConnection(ws);
             });
-        } else if (requestUrl === `${websocketPath}/audio`) {
+        } else if (url.pathname === "/audio") {
             wss.handleUpgrade(request, socket, head, (ws) => {
                 handleAudioConnection(ws);
             });
         } else {
-            console.log(`Connection refused for URL: ${requestUrl}`);
+            console.log(`Connection refused for URL: ${url.pathname}`);
             socket.destroy();
         }
     });
