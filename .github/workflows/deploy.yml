@@ -1,11 +1,9 @@
 name: Deploy to VPS
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
-  workflow_run:
-    workflows: ["Build and Push Docker Images"]
-    types:
-      - completed
 
 jobs:
   deploy:
@@ -22,12 +20,24 @@ jobs:
             eval $(ssh-agent -s)
             ssh-add ~/.ssh/system
             cd ./Nidalheim
+
             git pull
-            rm -rf .env
-            echo "NEXT_PUBLIC_SUPABASE_URL=${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}" > .env
-            echo "NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}" >> .env
-            echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> .env
-            echo "NIDALHEIM_API_KEY=${{ secrets.NIDALHEIM_API_KEY }}" >> .env
-            docker compose pull
-            docker compose up -d
-            docker compose restart nginx
+
+            cat > infra/.env << ENVEOF
+            NEXT_PUBLIC_SUPABASE_URL=${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+            NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+            OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+            NIDALHEIM_API_KEY=${{ secrets.NIDALHEIM_API_KEY }}
+            POSTGRES_USER=${{ secrets.POSTGRES_USER }}
+            POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+            POSTGRES_DB=${{ secrets.POSTGRES_DB }}
+            ENVEOF
+
+            cd infra
+            docker compose build
+            docker compose up -d --remove-orphans
+
+            # Run database migrations
+            docker compose run --rm db-migrate
+
+            docker image prune -f

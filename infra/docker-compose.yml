@@ -1,6 +1,8 @@
 services:
   nidalheim-site:
-    image: zarrockdle/site:latest
+    build:
+      context: ../web/site
+      dockerfile: Dockerfile
     container_name: nidalheim-site
     restart: unless-stopped
     environment:
@@ -11,7 +13,9 @@ services:
       - nidalheim-network
 
   nidalheim-docs:
-    image: zarrockdle/docs:latest
+    build:
+      context: ../web/docs
+      dockerfile: Dockerfile
     container_name: nidalheim-docs
     restart: unless-stopped
     environment:
@@ -22,7 +26,9 @@ services:
       - nidalheim-network
 
   api-auth:
-    image: zarrockdle/api-auth:latest
+    build:
+      context: ../services/api-auth
+      dockerfile: Dockerfile
     container_name: nidalheim-api-auth
     restart: unless-stopped
     environment:
@@ -33,17 +39,20 @@ services:
       - JWT_ACCESS_TOKEN_EXPIRY=15m
       - JWT_REFRESH_TOKEN_EXPIRY=7d
       - REDIS_URL=redis://redis:6379
-      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
     secrets:
       - jwt_private_key
       - jwt_public_key
     depends_on:
       - redis
+      - postgres
     networks:
       - nidalheim-network
 
   api-game:
-    image: zarrockdle/api-game:latest
+    build:
+      context: ../services/api-game
+      dockerfile: Dockerfile
     container_name: nidalheim-api-game
     restart: unless-stopped
     environment:
@@ -53,6 +62,32 @@ services:
       - NIDALHEIM_API_KEY=${NIDALHEIM_API_KEY}
     networks:
       - nidalheim-network
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: nidalheim-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-nidalheim}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB:-nidalheim}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - nidalheim-network
+
+  db-migrate:
+    build:
+      context: ../services/db
+      dockerfile: Dockerfile
+    container_name: nidalheim-db-migrate
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    depends_on:
+      - postgres
+    networks:
+      - nidalheim-network
+    restart: "no"
 
   redis:
     image: redis:7-alpine
@@ -86,6 +121,7 @@ secrets:
     file: ../services/api-auth/keys/public.pem
 
 volumes:
+  postgres-data:
   redis-data:
 
 networks:
