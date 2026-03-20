@@ -8,7 +8,7 @@ Service d'authentification REST avec JWT RS256 pour le projet Nidalheim.
 - **jsonwebtoken** — signature/verification JWT avec cles RSA
 - **bcrypt** — hachage des mots de passe
 - **ioredis** — stockage des refresh tokens dans Redis
-- **better-sqlite3** — base locale SQLite (fallback)
+- **pg** — driver PostgreSQL
 - **TypeScript** + **tsx**
 
 ## Endpoints
@@ -26,13 +26,13 @@ Service d'authentification REST avec JWT RS256 pour le projet Nidalheim.
 
 ```bash
 # Pre-requis : Redis et PostgreSQL en cours d'execution
-pnpm install
+npm install
 
 # Generer les cles RSA (premiere fois)
-pnpm generate-keys
+npm run generate-keys
 
 # Lancer le serveur (hot-reload)
-pnpm dev
+npm run dev
 ```
 
 Le serveur demarre sur le port `3001`.
@@ -52,10 +52,10 @@ Le serveur demarre sur le port `3001`.
 ## Scripts
 
 ```bash
-pnpm dev             # Dev avec hot-reload (tsx watch)
-pnpm build           # Compilation TypeScript
-pnpm start           # Production (node dist/)
-pnpm generate-keys   # Generer les cles RSA
+npm run dev             # Dev avec hot-reload (tsx watch)
+npm run build           # Compilation TypeScript
+npm start               # Production (node dist/)
+npm run generate-keys   # Generer les cles RSA
 ```
 
 ## Architecture
@@ -70,7 +70,7 @@ src/
 │   ├── logout.ts     # Deconnexion
 │   └── jwks.ts       # Endpoint JWKS
 ├── services/
-│   ├── db.ts         # Connexion SQLite
+│   ├── db.ts         # Connexion PostgreSQL
 │   ├── user.ts       # Logique utilisateur
 │   ├── jwt.ts        # Signature/verification JWT
 │   └── redis.ts      # Gestion refresh tokens

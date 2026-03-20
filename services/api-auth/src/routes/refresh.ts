@@ -26,7 +26,7 @@ router.post('/refresh', async (req: Request, res: Response) => {
     // Revoke old refresh token (rotation)
     await revokeRefreshToken(payload.sub, payload.tokenId);
 
-    const user = getUserById(payload.sub);
+    const user = await getUserById(payload.sub);
 
     const newAccessToken = signAccessToken(user);
     const newTokenId = uuidv4();

@@ -1,6 +1,6 @@
 import bcrypt from 'bcrypt';
 import { v4 as uuidv4 } from 'uuid';
-import db from './db.js';
+import pool from './db.js';
 
 const BCRYPT_ROUNDS = 12;
 
@@ -24,22 +24,27 @@ export async function createUser(
   email: string,
   password: string
 ): Promise<User> {
-  const existing = db
-    .prepare('SELECT id FROM users WHERE username = ? OR email = ?')
-    .get(username, email) as { id: string } | undefined;
+  const { rows: existing } = await pool.query(
+    'SELECT id FROM users WHERE username = $1 OR email = $2',
+    [username, email]
+  );
 
-  if (existing) {
+  if (existing.length > 0) {
     throw new Error('Username or email already exists');
   }
 
   const id = uuidv4();
   const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
 
-  db.prepare(
-    'INSERT INTO users (id, username, email, password_hash) VALUES (?, ?, ?, ?)'
-  ).run(id, username, email, passwordHash);
+  await pool.query(
+    'INSERT INTO users (id, username, email, password_hash) VALUES ($1, $2, $3, $4)',
+    [id, username, email, passwordHash]
+  );
 
-  db.prepare('INSERT INTO player_profiles (user_id) VALUES (?)').run(id);
+  await pool.query(
+    'INSERT INTO player_profiles (user_id) VALUES ($1)',
+    [id]
+  );
 
   return { id, username, email, role: 'player' };
 }
@@ -48,12 +53,12 @@ export async function authenticateUser(
   username: string,
   password: string
 ): Promise<User> {
-  const user = db
-    .prepare(
-      'SELECT id, username, email, password_hash, role FROM users WHERE username = ?'
-    )
-    .get(username) as UserRow | undefined;
+  const { rows } = await pool.query<UserRow>(
+    'SELECT id, username, email, password_hash, role FROM users WHERE username = $1',
+    [username]
+  );
 
+  const user = rows[0];
   if (!user) {
     throw new Error('Invalid credentials');
   }
@@ -66,11 +71,13 @@ export async function authenticateUser(
   return { id: user.id, username: user.username, email: user.email, role: user.role };
 }
 
-export function getUserById(id: string): User {
-  const user = db
-    .prepare('SELECT id, username, email, role FROM users WHERE id = ?')
-    .get(id) as User | undefined;
+export async function getUserById(id: string): Promise<User> {
+  const { rows } = await pool.query<User>(
+    'SELECT id, username, email, role FROM users WHERE id = $1',
+    [id]
+  );
 
+  const user = rows[0];
   if (!user) {
     throw new Error('User not found');
   }

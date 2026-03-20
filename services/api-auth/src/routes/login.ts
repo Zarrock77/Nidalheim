@@ -23,7 +23,7 @@ router.post('/login', async (req: Request, res: Response) => {
 
     await storeRefreshToken(user.id, tokenId);
 
-    res.json({ accessToken, refreshToken });
+    res.json({ user, accessToken, refreshToken });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Login failed';
     if (message === 'Invalid credentials') {
