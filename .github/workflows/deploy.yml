@@ -24,13 +24,12 @@ jobs:
             git pull
 
             cat > infra/.env << ENVEOF
-            NEXT_PUBLIC_SUPABASE_URL=${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
-            NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
             OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
             NIDALHEIM_API_KEY=${{ secrets.NIDALHEIM_API_KEY }}
             POSTGRES_USER=${{ secrets.POSTGRES_USER }}
             POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
             POSTGRES_DB=${{ secrets.POSTGRES_DB }}
+            AUTH_SECRET=${{ secrets.AUTH_SECRET }}
             ENVEOF
 
             cd infra

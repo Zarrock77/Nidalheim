@@ -27,7 +27,7 @@ nidalheim/
 | Runtime | Node.js 22, TypeScript |
 | Backend | Express 5, WebSocket (ws), OpenAI API |
 | Frontend | Next.js 16, React 19, Tailwind CSS 4, Nextra |
-| Base de donnees | PostgreSQL 16, Redis 7, SQLite |
+| Base de donnees | PostgreSQL 16, Redis 7 |
 | ORM | Drizzle ORM |
 | Auth | JWT RS256, bcrypt |
 | Infra | Docker, Nginx, GitHub Actions |

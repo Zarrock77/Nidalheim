@@ -1,20 +1,27 @@
 import { login } from "./actions";
 
-export default function LoginPage() {
+export default async function LoginPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ error?: string }>;
+}) {
+  const { error } = await searchParams;
+
   return (
     <div className="flex min-h-full flex-col justify-center px-6 py-12 lg:px-8">
       <div className="sm:mx-auto sm:w-full sm:max-w-sm">
-        <img
-          src="https://tailwindcss.com/plus-assets/img/logos/mark.svg?color=indigo&shade=500"
-          alt="Your Company"
-          className="mx-auto h-10 w-auto"
-        />
         <h2 className="mt-10 text-center text-2xl/9 font-bold tracking-tight text-white">
           Sign in to your account
         </h2>
       </div>
 
       <div className="mt-10 sm:mx-auto sm:w-full sm:max-w-sm">
+        {error && (
+          <div className="mb-4 rounded-md bg-red-500/10 border border-red-500/20 p-3 text-sm text-red-400">
+            Invalid email or password.
+          </div>
+        )}
+
         <form action="#" method="POST" className="space-y-6">
           <div>
             <label
@@ -43,14 +50,6 @@ export default function LoginPage() {
               >
                 Password
               </label>
-              <div className="text-sm">
-                <a
-                  href="#"
-                  className="font-semibold text-indigo-400 hover:text-indigo-300"
-                >
-                  Forgot password?
-                </a>
-              </div>
             </div>
             <div className="mt-2">
               <input

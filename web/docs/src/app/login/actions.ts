@@ -1,23 +1,18 @@
 "use server";
 
-import { revalidatePath } from "next/cache";
+import { signIn } from "@/lib/auth";
 import { redirect } from "next/navigation";
-import { createClient } from "@/lib/supabase/server";
 
 export async function login(formData: FormData) {
-  const supabase = await createClient();
-
-  const data = {
+  const result = await signIn("credentials", {
     email: formData.get("email") as string,
     password: formData.get("password") as string,
-  };
+    redirect: false,
+  });
 
-  const { error } = await supabase.auth.signInWithPassword(data);
-
-  if (error) {
-    redirect("/error");
+  if (result?.error) {
+    redirect("/login?error=invalid");
   }
 
-  revalidatePath("/", "layout");
   redirect("/");
 }

@@ -1,35 +1,37 @@
-"use server";
-
-import { createClient } from "@/lib/supabase/server";
+import fs from "fs";
+import path from "path";
 import matter from "gray-matter";
 import { PatchNoteMeta } from "@/features/patch-notes/types";
 
+const patchNotesDir = path.join(process.cwd(), "content", "patch-notes");
+
 export async function getPatchNotes(limit?: number): Promise<PatchNoteMeta[]> {
-  const supabase = await createClient();
-  const { data: files } = await supabase.storage.from("patch-notes").list("", {
-    sortBy: {
-      column: "name",
-      order: "asc",
-    },
-    search: "v",
-    limit: limit,
-  });
+  if (!fs.existsSync(patchNotesDir)) {
+    return [];
+  }
+
+  const files = fs
+    .readdirSync(patchNotesDir)
+    .filter((f) => f.endsWith(".mdx"))
+    .sort();
+
   const patchNotes: PatchNoteMeta[] = [];
-  for (const file of files || []) {
-    if (!file.name.endsWith(".mdx")) continue;
-    const { data } = await supabase.storage
-      .from("patch-notes")
-      .download(file.name);
-    if (!data) continue;
-    const text = await data.text();
-    const { data: meta } = matter(text);
+
+  for (const file of files) {
+    const raw = fs.readFileSync(path.join(patchNotesDir, file), "utf-8");
+    const { data: meta } = matter(raw);
     patchNotes.push({
-      slug: file.name.replace(".mdx", ""),
+      slug: file.replace(".mdx", ""),
       title: meta.title,
       version: `v${meta.version}`,
       date: meta.date,
       summary: meta.summary,
     });
   }
+
+  if (limit) {
+    return patchNotes.slice(0, limit);
+  }
+
   return patchNotes;
 }

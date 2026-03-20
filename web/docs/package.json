@@ -10,9 +10,8 @@
     "postbuild": "pagefind --site .next/server/app --output-path public/_pagefind"
   },
   "dependencies": {
-    "@supabase/ssr": "^0.7.0",
-    "@supabase/supabase-js": "^2.76.1",
     "@tailwindcss/typography": "^0.5.19",
+    "next-auth": "^5.0.0-beta.25",
     "next": "16.0.0",
     "nextra": "^4.6.0",
     "nextra-theme-docs": "^4.6.0",

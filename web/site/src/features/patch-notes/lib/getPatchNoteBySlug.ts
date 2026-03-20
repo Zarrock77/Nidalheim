@@ -1,6 +1,5 @@
-"use server";
-
-import { createClient } from "@/lib/supabase/server";
+import fs from "fs";
+import path from "path";
 
 export interface PatchNoteFrontmatter {
   title: string;
@@ -14,19 +13,19 @@ export interface PatchNoteData {
   content: string;
 }
 
+const patchNotesDir = path.join(process.cwd(), "content", "patch-notes");
+
 export async function getPatchNoteBySlug(
   slug: string
 ): Promise<PatchNoteData | null> {
-  const supabase = await createClient();
-  const { data, error } = await supabase.storage
-    .from("patch-notes")
-    .download(`${slug}.mdx`);
-  if (error || !data) {
+  const filePath = path.join(patchNotesDir, `${slug}.mdx`);
+
+  if (!fs.existsSync(filePath)) {
     return null;
   }
-  const text = await data.text();
 
-  // Parse frontmatter manually
+  const text = fs.readFileSync(filePath, "utf-8");
+
   const frontmatterRegex = /^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/;
   const match = text.match(frontmatterRegex);
 
@@ -45,7 +44,6 @@ export async function getPatchNoteBySlug(
   const frontmatterText = match[1];
   const content = match[2];
 
-  // Parse YAML frontmatter
   const frontmatter: PatchNoteFrontmatter = {
     title: "",
     version: "",
