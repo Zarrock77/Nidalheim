@@ -57,7 +57,9 @@ services:
       - NODE_ENV=production
       - PORT=3002
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - NIDALHEIM_API_KEY=${NIDALHEIM_API_KEY}
+      - JWT_PUBLIC_KEY_PATH=/run/secrets/jwt_public_key
+    secrets:
+      - jwt_public_key
     networks:
       - nidalheim-network
 

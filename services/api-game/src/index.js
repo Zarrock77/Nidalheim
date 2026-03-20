@@ -1,9 +1,20 @@
 import WebSocket, { WebSocketServer } from "ws";
 import OpenAI from "openai";
 import http from "http";
+import jwt from "jsonwebtoken";
+import { readFileSync } from "fs";
 import { config } from "dotenv";
 
 config();
+
+const JWT_PUBLIC_KEY = readFileSync(
+  process.env.JWT_PUBLIC_KEY_PATH || "./keys/public.pem",
+  "utf8"
+);
+
+function verifyToken(token) {
+  return jwt.verify(token, JWT_PUBLIC_KEY, { algorithms: ["RS256"] });
+}
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
@@ -42,8 +53,8 @@ function startHeartbeat(ws) {
     }, 30000);
 }
 
-function handleTextConnection(websocket) {
-    console.log("Client connected to text endpoint");
+function handleTextConnection(websocket, user) {
+    console.log(`Client connected to text endpoint (user: ${user.username})`);
     startHeartbeat(websocket);
     let chatHistory = [];
     const initPrompt =
@@ -75,7 +86,7 @@ function handleTextConnection(websocket) {
     });
 
     websocket.on("close", () => {
-        console.log("Client disconnected from text endpoint");
+        console.log(`Client disconnected from text endpoint (user: ${user.username})`);
     });
 
     websocket.on("error", (error) => {
@@ -83,8 +94,8 @@ function handleTextConnection(websocket) {
     });
 }
 
-function handleAudioConnection(clientWs) {
-    console.log("Client connected to audio endpoint");
+function handleAudioConnection(clientWs, user) {
+    console.log(`Client connected to audio endpoint (user: ${user.username})`);
     startHeartbeat(clientWs);
 
     const systemPrompt =
@@ -316,7 +327,7 @@ function handleAudioConnection(clientWs) {
     });
 
     clientWs.on("close", () => {
-        console.log("Client disconnected from audio endpoint");
+        console.log(`Client disconnected from audio endpoint (user: ${user.username})`);
         if (openaiWs.readyState === WebSocket.OPEN) {
             openaiWs.close();
         }
@@ -328,32 +339,35 @@ function handleAudioConnection(clientWs) {
 }
 
 function main() {
-    const nidalheimAPIKey = process.env.NIDALHEIM_API_KEY;
-    if (!nidalheimAPIKey) {
-        console.error("Error: NIDALHEIM_API_KEY environment variable is not defined");
-        process.exit(1);
-    }
-
     const server = http.createServer();
     const wss = new WebSocketServer({ noServer: true });
 
     server.on("upgrade", (request, socket, head) => {
         const url = new URL(request.url, `http://${request.headers.host}`);
-        const apiKey = url.searchParams.get("api_key");
+        const token = url.searchParams.get("token");
 
-        if (apiKey !== nidalheimAPIKey) {
-            console.log("Connection refused: invalid api_key");
+        if (!token) {
+            console.log("Connection refused: missing token");
+            socket.destroy();
+            return;
+        }
+
+        let user;
+        try {
+            user = verifyToken(token);
+        } catch (err) {
+            console.log(`Connection refused: invalid token (${err.message})`);
             socket.destroy();
             return;
         }
 
         if (url.pathname === "/text") {
             wss.handleUpgrade(request, socket, head, (ws) => {
-                handleTextConnection(ws);
+                handleTextConnection(ws, user);
             });
         } else if (url.pathname === "/audio") {
             wss.handleUpgrade(request, socket, head, (ws) => {
-                handleAudioConnection(ws);
+                handleAudioConnection(ws, user);
             });
         } else {
             console.log(`Connection refused for URL: ${url.pathname}`);
