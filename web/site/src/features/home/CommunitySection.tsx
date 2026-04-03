@@ -27,11 +27,13 @@ export const CommunitySection = () => {
           <div className="flex flex-wrap justify-center gap-6">
             <motion.a
               href="https://discord.gg/yKyHQyANvm"
-              whileHover={{ scale: 1.1 }}
-              className="flex items-center gap-3 bg-card border border-primary/30 rounded-lg px-8 py-4 hover:border-primary hover:shadow-[0_0_20px_rgba(31,138,192,0.4)] transition-all duration-300"
+              whileHover={{ scale: 1.05 }}
+              className="reverse-radius-sm group inline-block bg-[#1f8ac0] p-px transition-colors duration-300"
             >
-              <MessageCircle size={28} className="text-primary" />
-              <span>Discord</span>
+              <span className="reverse-radius-sm-inner flex items-center gap-3 bg-card px-8 py-4 transition-colors duration-300 group-hover:bg-black/50">
+                <MessageCircle size={28} className="text-primary" />
+                <span>Discord</span>
+              </span>
             </motion.a>
           </div>
         </motion.div>

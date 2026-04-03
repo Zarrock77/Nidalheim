@@ -20,11 +20,13 @@ export const FeatureCard: React.FC<FeatureCardProps> = ({
       whileInView={{ opacity: 1, y: 0 }}
       viewport={{ once: true }}
       transition={{ duration: 0.6 }}
-      className="bg-card border border-foreground/10 rounded-lg p-8 hover:border-primary/50 transition-all duration-300 hover:shadow-[0_0_30px_rgba(31,138,192,0.2)]"
+      className="reverse-radius group bg-foreground/10 p-px transition-colors duration-300 hover:bg-[#1f8ac0]/60"
     >
-      <div className="text-primary mb-4">{icon}</div>
-      <h3 className="mb-3 text-secondary">{title}</h3>
-      <p className="text-muted-foreground leading-relaxed">{description}</p>
+      <div className="reverse-radius-inner bg-card p-8 transition-colors duration-300 group-hover:shadow-[0_0_30px_rgba(31,138,192,0.2)]">
+        <div className="text-primary mb-4">{icon}</div>
+        <h3 className="mb-3 text-secondary">{title}</h3>
+        <p className="text-muted-foreground leading-relaxed">{description}</p>
+      </div>
     </motion.div>
   );
 };

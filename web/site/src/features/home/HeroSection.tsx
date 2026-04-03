@@ -1,7 +1,21 @@
 "use client";
 
+import type { CSSProperties } from "react";
 import { motion } from "motion/react";
-import { GameButton } from "@/components/GameButton";
+
+const LAYER_0: CSSProperties = { "--rr": "7px" } as CSSProperties;
+const LAYER_1_GAP: CSSProperties = {
+  "--rr": "8px",
+  "--rr-off": "1px",
+} as CSSProperties;
+const LAYER_2_RING: CSSProperties = {
+  "--rr": "10px",
+  "--rr-off": "3px",
+} as CSSProperties;
+const LAYER_3_CORE: CSSProperties = {
+  "--rr": "11px",
+  "--rr-off": "4px",
+} as CSSProperties;
 
 export const HeroSection = () => {
   return (
@@ -27,12 +41,50 @@ export const HeroSection = () => {
         <h1 className="text-6xl md:text-8xl font-['Cinzel'] text-secondary mb-6 drop-shadow-[0_0_30px_rgba(214,175,54,0.6)]">
           NIDALHEIM
         </h1>
-        <p className="text-xl md:text-2xl text-foreground mb-12 max-w-3xl mx-auto">
+        <p className="font-['Cinzel'] tracking-[0.15em] text-xl md:text-2xl text-foreground/90 mb-12 max-w-3xl mx-auto">
           Enter the Forgotten Realms of Nidalheim
         </p>
         <div className="flex flex-col sm:flex-row gap-4 justify-center">
-          <GameButton variant="primary">Play Demo</GameButton>
-          <GameButton variant="outline">Read Patch Notes</GameButton>
+          {/* Download for Windows — filled gold with double border */}
+          <button
+            className="rr-mask group inline-block cursor-pointer bg-[#d6af36] p-px"
+            style={LAYER_0}
+          >
+            <span className="rr-mask block bg-[#0a0a0f] p-[2px]" style={LAYER_1_GAP}>
+              <span className="rr-mask block bg-[#d6af36] p-px" style={LAYER_2_RING}>
+                <span
+                  className="rr-mask inline-flex items-center justify-center gap-2.5 bg-[#d6af36] px-7 py-3 font-['Cinzel'] text-sm uppercase tracking-[0.2em] text-[#0a0a0f] transition-colors duration-200 group-hover:bg-[#b89520]"
+                  style={LAYER_3_CORE}
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    aria-hidden="true"
+                    className="h-4 w-4 fill-current"
+                  >
+                    <path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.9-1.801" />
+                  </svg>
+                  <span>Download for Windows</span>
+                </span>
+              </span>
+            </span>
+          </button>
+
+          {/* Read Patch Notes — outline with double border */}
+          <button
+            className="rr-mask group inline-block cursor-pointer bg-[#d6af36] p-px"
+            style={LAYER_0}
+          >
+            <span className="rr-mask block bg-[#0a0a0f] p-[2px]" style={LAYER_1_GAP}>
+              <span className="rr-mask block bg-[#d6af36] p-px" style={LAYER_2_RING}>
+                <span
+                  className="rr-mask inline-flex items-center justify-center bg-[#0a0a0f] px-7 py-3 font-['Cinzel'] text-sm uppercase tracking-[0.2em] text-[#d6af36] transition-colors duration-200 group-hover:bg-black/50"
+                  style={LAYER_3_CORE}
+                >
+                  Read Patch Notes
+                </span>
+              </span>
+            </span>
+          </button>
         </div>
       </motion.div>
 

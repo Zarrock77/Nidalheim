@@ -2,6 +2,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Navigation } from "@/components/Layout/Navigation";
 import { Footer } from "@/components/Layout/Footer";
+import { AuthProvider } from "@/lib/auth/AuthContext";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -29,11 +30,13 @@ export default function RootLayout({
           } as React.CSSProperties
         }
       >
-        <div className="min-h-screen bg-background text-foreground">
-          <Navigation />
-          {children}
-          <Footer />
-        </div>
+        <AuthProvider>
+          <div className="min-h-screen bg-background text-foreground">
+            <Navigation />
+            {children}
+            <Footer />
+          </div>
+        </AuthProvider>
       </body>
     </html>
   );
