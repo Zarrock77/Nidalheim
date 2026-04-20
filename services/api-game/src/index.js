@@ -1,6 +1,8 @@
 import WebSocket, { WebSocketServer } from "ws";
 import OpenAI from "openai";
 import { AudioPipeline } from "./audioPipeline.js";
+import { ConversationStore } from "./conversationStore.js";
+import { SYSTEM_PROMPT } from "./systemPrompt.js";
 import http from "http";
 import jwt from "jsonwebtoken";
 import { readFileSync } from "fs";
@@ -23,25 +25,6 @@ const client = new OpenAI({
     apiKey: OPENAI_API_KEY,
 });
 
-async function chatgptResponse(chatHistory, chatMessage) {
-    chatHistory.push({ role: "user", content: chatMessage });
-
-    try {
-        const response = await client.chat.completions.create({
-            model: process.env.TEXT_LLM_MODEL || "gpt-4.1-nano",
-            messages: chatHistory,
-        });
-
-        const assistantMessage = response.choices[0].message.content;
-        chatHistory.push({ role: "assistant", content: assistantMessage });
-        console.log(assistantMessage);
-        return assistantMessage;
-    } catch (error) {
-        console.log(`OpenAI API error: ${error}`);
-        return "Error generating response.";
-    }
-}
-
 function startHeartbeat(ws) {
     ws.on("close", () => clearInterval(interval));
 
@@ -54,36 +37,66 @@ function startHeartbeat(ws) {
     }, 30000);
 }
 
-function handleTextConnection(websocket, user) {
+// Text chat now mirrors the voice path: same system prompt, same LLM
+// (Groq/Llama by default, OpenAI-compat fallback), same Postgres-backed
+// conversation store so history carries across voice ↔ text and across
+// sessions.
+const textChatClient = new OpenAI({
+    apiKey: process.env.LLM_API_KEY || OPENAI_API_KEY,
+    baseURL: process.env.LLM_BASE_URL || undefined,
+});
+const textChatModel = process.env.LLM_MODEL || "llama-3.1-8b-instant";
+
+async function handleTextConnection(websocket, user) {
     console.log(`Client connected to text endpoint (user: ${user.username})`);
     startHeartbeat(websocket);
-    let chatHistory = [];
-    const initPrompt =
-        "Tu es un villageois du village appele Nidalheim, ne te laisse pas faire si on te provoque, tu as de l'humour donc hesite pas a charier un peu si il y a une occasion. Lorsque tu parles, tu es le plus concis possible, une seule phrase suffit, et de preference une courte phrase. Une personne qui t'es inconnue te parle, il semble etre nouveau dans le village et il te dit: ";
-    let initPromptSent = false;
-    let prompt = "";
+
+    const store = new ConversationStore({ maxHistory: 20 });
+    let history = [];
+    try {
+        history = await store.loadRecent(user.id);
+        if (history.length > 0) {
+            console.log(`[text ${user.username}] restored ${history.length} past messages`);
+        }
+    } catch (err) {
+        console.error(`[text ${user.username}] history load failed:`, err?.message ?? err);
+    }
 
     websocket.on("message", async (message) => {
+        const userText = message.toString().trim();
+        if (!userText) return;
+        console.log(`[text ${user.username}] user: ${userText}`);
+
+        history.push({ role: "user", content: userText });
+        const messages = [
+            { role: "system", content: SYSTEM_PROMPT },
+            ...history,
+        ];
+
+        let reply;
         try {
-            const messageStr = message.toString();
-            console.log(`Text message received: ${messageStr}`);
-
-            if (initPromptSent) {
-                prompt = messageStr;
-            } else {
-                prompt = initPrompt + messageStr;
-                initPromptSent = true;
-            }
-
-            const response = await chatgptResponse(chatHistory, prompt);
-            console.log(`Response sent: ${response}`);
-            websocket.send(response);
-        } catch (error) {
-            console.log(
-                `Error processing text message: ${error}`,
-            );
-            websocket.send("Error processing your message.");
+            const response = await textChatClient.chat.completions.create({
+                model: textChatModel,
+                messages,
+            });
+            reply = response.choices[0]?.message?.content ?? "";
+        } catch (err) {
+            console.error(`[text ${user.username}] LLM error:`, err?.message ?? err);
+            websocket.send("Error generating response.");
+            // Remove the un-answered user turn so we don't get a lopsided history.
+            history.pop();
+            return;
         }
+
+        history.push({ role: "assistant", content: reply });
+        if (history.length > 40) history.splice(0, history.length - 40);
+
+        console.log(`[text ${user.username}] npc: ${reply}`);
+        websocket.send(reply);
+
+        store
+            .appendTurn(user.id, userText, reply, "text")
+            .catch((err) => console.error(`[text ${user.username}] save failed:`, err?.message ?? err));
     });
 
     websocket.on("close", () => {
@@ -130,6 +143,19 @@ function handleAudioConnection(clientWs, user) {
         if (str === "COMMIT" || str.includes("COMMIT")) {
             pipeline.onClientCommit();
             return;
+        }
+        // JSON control frames (audio_config, future control messages) travel on the
+        // same WS as the base64 PCM chunks — dispatch them before the length filter.
+        if (str.startsWith("{")) {
+            try {
+                const ctrl = JSON.parse(str);
+                if (ctrl && typeof ctrl.type === "string") {
+                    if (ctrl.type === "audio_config") {
+                        pipeline.onClientAudioConfig(ctrl);
+                        return;
+                    }
+                }
+            } catch (_) { /* fall through — treat as audio */ }
         }
         if (str.length < 100) return; // ignore tiny control frames
         try {
@@ -182,6 +208,9 @@ function main() {
         let user;
         try {
             user = verifyToken(token);
+            // Normalize: JWT uses the standard "sub" claim for user id; the rest
+            // of the pipeline (ConversationStore, logging) expects user.id.
+            user.id = user.sub;
         } catch (err) {
             console.log(`[auth ${clientIp}] REJECTED ${path}: invalid token (${tokenPreview}) — ${err.message}`);
             socket.destroy();

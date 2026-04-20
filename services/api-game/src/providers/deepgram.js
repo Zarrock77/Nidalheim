@@ -124,4 +124,21 @@ export class DeepgramStreamingSTT {
         try { this.live.finish(); } catch (_) { /* ignore */ }
         this.live = null;
     }
+
+    /**
+     * Close the current live WS and open a new one with updated parameters
+     * (typically used when the client's default mic changes mid-session and
+     * reports a different sample_rate). Any buffered audio still in flight is
+     * dropped — callers are expected to only reconfigure between utterances.
+     */
+    async reconfigure({ sampleRate, language } = {}) {
+        if (typeof sampleRate === "number" && sampleRate > 0) {
+            this.sampleRate = sampleRate;
+        }
+        if (typeof language === "string" && language.length > 0) {
+            this.language = language;
+        }
+        this.close();
+        await this.start();
+    }
 }

@@ -24,6 +24,27 @@ export class LLMStreaming {
         this.history = [];
     }
 
+    /**
+     * Replace the in-memory history with an externally-loaded one (typically
+     * fetched from Postgres at session start). Pass an array of
+     * `{role, content}` entries in chronological order.
+     */
+    setHistory(messages) {
+        if (!Array.isArray(messages)) {
+            this.history = [];
+            return;
+        }
+        this.history = messages
+            .filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
+            .map((m) => ({ role: m.role, content: m.content }));
+        this._trimHistory();
+    }
+
+    /** Read-only snapshot of the current working history. */
+    getHistory() {
+        return this.history.slice();
+    }
+
     async streamResponse(userText, { onDelta, onComplete, onError }) {
         this.history.push({ role: "user", content: userText });
         this._trimHistory();

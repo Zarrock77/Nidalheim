@@ -5,11 +5,8 @@ import { DeepgramStreamingSTT } from "./providers/deepgram.js";
 import { ElevenLabsStreamingTTS } from "./providers/elevenlabs.js";
 import { CartesiaStreamingTTS } from "./providers/cartesia.js";
 import { LLMStreaming } from "./providers/llm.js";
-
-const SYSTEM_PROMPT =
-    "Tu es un villageois du village appelé Nidalheim. Tu parles uniquement en Français. " +
-    "Tu es serviable : si on te pose une question, tu réponds. " +
-    "Lorsque tu parles, tu es le plus concis possible — une seule phrase, courte si possible.";
+import { ConversationStore } from "./conversationStore.js";
+import { SYSTEM_PROMPT } from "./systemPrompt.js";
 
 const KEEPALIVE_INTERVAL_MS = 8000;
 
@@ -50,6 +47,7 @@ export class AudioPipeline {
             baseURL: config.llmBaseUrl,
         });
         this.ttsRoute = makeTTS(config);
+        this.conversationStore = new ConversationStore({ maxHistory: 20 });
         this.utteranceInFlight = false;
         this.pendingTranscript = "";
         this.commitRequested = false;
@@ -57,6 +55,10 @@ export class AudioPipeline {
         this.keepAliveTimer = null;
         this._audioChunks = 0;
         this._audioBytes = 0;
+        // Buffer incoming PCM until the client has told us its capture sample rate
+        // (prevents Deepgram from being fed audio at the wrong rate on the first chunks).
+        this._awaitingFirstConfig = true;
+        this._preConfigBuffer = null;
     }
 
     async start() {
@@ -88,21 +90,38 @@ export class AudioPipeline {
             this._send({ type: "error", message: `speech-to-text: ${err?.message ?? err}` });
         };
 
-        // Pre-warm STT and (if applicable) persistent TTS in parallel.
-        const startups = [this.stt.start()];
+        // Intentionally DON'T open the Deepgram WS here — we wait for the
+        // client's first `audio_config` message so we can open it at the
+        // correct sample rate from the very first frame (no reconfigure, no
+        // cold-start penalty on the first PTT). Persistent TTS still warms up
+        // eagerly so it's ready as soon as the LLM emits.
+        this._sttOpened = false;
+
+        // Hydrate the LLM with the user's past dialog so the NPC remembers them
+        // across sessions. Done in parallel with TTS warmup — neither blocks
+        // the first PTT.
+        const hydrate = (async () => {
+            try {
+                const history = await this.conversationStore.loadRecent(this.user.id);
+                if (history.length > 0) {
+                    this.llm.setHistory(history);
+                    console.log(`[pipeline ${this.user.username}] restored ${history.length} past messages`);
+                }
+            } catch (err) {
+                console.error(`[pipeline ${this.user.username}] conversation load failed:`, err?.message ?? err);
+            }
+        })();
+
         if (this.ttsRoute.persistent) {
-            startups.push(
-                this.ttsRoute.instance.start().then(() => {
-                    console.log(`[pipeline ${this.user.username}] tts (persistent) ready`);
-                }),
-            );
+            await this.ttsRoute.instance.start();
+            console.log(`[pipeline ${this.user.username}] tts (persistent) ready`);
         }
-        await Promise.all(startups);
+        await hydrate;
 
         this.keepAliveTimer = setInterval(() => {
             if (!this.disposed) this.stt.keepAlive();
         }, KEEPALIVE_INTERVAL_MS);
-        console.log(`[pipeline ${this.user.username}] started (tts=${this.ttsRoute.kind})`);
+        console.log(`[pipeline ${this.user.username}] started (tts=${this.ttsRoute.kind}); STT waiting for audio_config`);
     }
 
     onClientAudio(pcm16Buffer) {
@@ -124,6 +143,16 @@ export class AudioPipeline {
             }
             this._debugStream.write(pcm16Buffer);
         }
+        // If the client hasn't told us its rate yet, briefly buffer so we don't
+        // ship audio to a Deepgram WS tuned to the wrong sample rate (would
+        // produce empty transcripts until the reconfigure lands).
+        if (this._awaitingFirstConfig) {
+            if (!this._preConfigBuffer) this._preConfigBuffer = [];
+            this._preConfigBuffer.push(pcm16Buffer);
+            // Cap the buffer so a misbehaving client can't OOM us (~1 s of audio @ 48 kHz mono).
+            if (this._preConfigBuffer.length > 200) this._preConfigBuffer.shift();
+            return;
+        }
         this.stt.sendAudio(pcm16Buffer);
     }
 
@@ -134,6 +163,47 @@ export class AudioPipeline {
         this.stt.finalize();
         this._audioChunks = 0;
         this._audioBytes = 0;
+    }
+
+    /**
+     * Client-reported audio capture parameters (rate, channels, device name).
+     * If the sample rate differs from what Deepgram is currently configured
+     * for, transparently rebuild the STT WS with the new rate — lets the UE5
+     * client swap mic mid-session without restarting the editor.
+     */
+    async onClientAudioConfig(msg) {
+        const rate = Number(msg?.sample_rate);
+        if (!Number.isFinite(rate) || rate <= 0) return;
+        const device = msg?.device || "(unknown)";
+        const hfp = msg?.bluetooth_hfp ? " [Bluetooth HFP]" : "";
+        console.log(`[pipeline ${this.user.username}] audio_config: ${rate} Hz from "${device}"${hfp}`);
+
+        try {
+            if (!this._sttOpened) {
+                // First config ever — open Deepgram straight at the right rate.
+                this.stt.sampleRate = rate;
+                await this.stt.start();
+                this._sttOpened = true;
+                console.log(`[pipeline ${this.user.username}] Deepgram opened at ${rate} Hz`);
+            } else if (rate !== this.stt.sampleRate) {
+                // Mid-session device change — rebuild Deepgram with the new rate.
+                console.log(`[pipeline ${this.user.username}] reconfiguring Deepgram: ${this.stt.sampleRate} Hz -> ${rate} Hz`);
+                await this.stt.reconfigure({ sampleRate: rate });
+                console.log(`[pipeline ${this.user.username}] Deepgram reconfigured at ${rate} Hz`);
+            }
+        } catch (err) {
+            console.error(`[pipeline ${this.user.username}] Deepgram open/reconfigure failed:`, err);
+            this._send({ type: "error", message: `stt: ${err?.message ?? err}` });
+            return;
+        }
+
+        // Flush any audio that arrived before the config (we were buffering).
+        this._awaitingFirstConfig = false;
+        if (this._preConfigBuffer && this._preConfigBuffer.length) {
+            console.log(`[pipeline ${this.user.username}] flushing ${this._preConfigBuffer.length} pre-config audio chunks`);
+            for (const buf of this._preConfigBuffer) this.stt.sendAudio(buf);
+            this._preConfigBuffer = null;
+        }
     }
 
     _flushUtterance() {
@@ -226,6 +296,9 @@ export class AudioPipeline {
                         // ElevenLabs auto-closes on isFinal; nothing more to do.
                     }
                 });
+                this.conversationStore
+                    .appendTurn(this.user.id, userText, full, "audio")
+                    .catch((err) => console.error(`[pipeline ${this.user.username}] history save failed:`, err?.message ?? err));
             },
             onError: (err) => {
                 this._send({ type: "error", message: `llm: ${err?.message ?? err}` });
