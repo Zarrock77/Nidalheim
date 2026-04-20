@@ -6,10 +6,15 @@ export const metadata: Metadata = {
   description: "Enter the realm of Nidalheim.",
 };
 
-export default function LoginPage() {
+export default async function LoginPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ returnTo?: string }>;
+}) {
+  const { returnTo } = await searchParams;
   return (
     <main className="relative flex min-h-screen items-center justify-center px-6 pt-24 pb-16">
-      <AuthForm mode="login" />
+      <AuthForm mode="login" returnTo={returnTo} />
     </main>
   );
 }

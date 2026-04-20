@@ -9,9 +9,21 @@ type Mode = "login" | "register";
 
 interface AuthFormProps {
   mode: Mode;
+  returnTo?: string;
 }
 
-export const AuthForm: React.FC<AuthFormProps> = ({ mode }) => {
+function sanitizeReturnTo(rt: string | undefined): string {
+  if (!rt) return "/";
+  if (!rt.startsWith("/") || rt.startsWith("//")) return "/";
+  return rt;
+}
+
+function withReturnTo(path: string, returnTo?: string): string {
+  if (!returnTo) return path;
+  return `${path}?returnTo=${encodeURIComponent(returnTo)}`;
+}
+
+export const AuthForm: React.FC<AuthFormProps> = ({ mode, returnTo }) => {
   const { login, register } = useAuth();
   const router = useRouter();
   const [username, setUsername] = useState("");
@@ -30,7 +42,7 @@ export const AuthForm: React.FC<AuthFormProps> = ({ mode }) => {
       } else {
         await register(username.trim(), email.trim(), password);
       }
-      router.push("/");
+      router.push(sanitizeReturnTo(returnTo));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
     } finally {
@@ -118,7 +130,7 @@ export const AuthForm: React.FC<AuthFormProps> = ({ mode }) => {
           <>
             New to Nidalheim?{" "}
             <Link
-              href="/register"
+              href={withReturnTo("/register", returnTo)}
               className="text-[#d6af36] underline-offset-4 hover:underline"
             >
               Create an account
@@ -128,7 +140,7 @@ export const AuthForm: React.FC<AuthFormProps> = ({ mode }) => {
           <>
             Already a villager?{" "}
             <Link
-              href="/login"
+              href={withReturnTo("/login", returnTo)}
               className="text-[#d6af36] underline-offset-4 hover:underline"
             >
               Sign in

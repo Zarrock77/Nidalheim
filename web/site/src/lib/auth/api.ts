@@ -57,3 +57,42 @@ export async function refresh(refreshToken: string): Promise<AuthTokens> {
     body: JSON.stringify({ refreshToken }),
   });
 }
+
+export interface DeviceLookupInfo {
+  user_code: string;
+  client_name: string;
+  expires_in: number;
+}
+
+export async function deviceLookup(
+  accessToken: string,
+  userCode: string,
+): Promise<DeviceLookupInfo> {
+  return request("/device/lookup", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}` },
+    body: JSON.stringify({ user_code: userCode }),
+  });
+}
+
+export async function deviceApprove(
+  accessToken: string,
+  userCode: string,
+): Promise<{ status: string }> {
+  return request("/device/approve", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}` },
+    body: JSON.stringify({ user_code: userCode }),
+  });
+}
+
+export async function deviceDeny(
+  accessToken: string,
+  userCode: string,
+): Promise<{ status: string }> {
+  return request("/device/deny", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}` },
+    body: JSON.stringify({ user_code: userCode }),
+  });
+}
