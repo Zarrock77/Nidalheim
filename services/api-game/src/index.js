@@ -1,5 +1,6 @@
 import WebSocket, { WebSocketServer } from "ws";
 import OpenAI from "openai";
+import { AudioPipeline } from "./audioPipeline.js";
 import http from "http";
 import jwt from "jsonwebtoken";
 import { readFileSync } from "fs";
@@ -27,7 +28,7 @@ async function chatgptResponse(chatHistory, chatMessage) {
 
     try {
         const response = await client.chat.completions.create({
-            model: "o3-mini",
+            model: process.env.TEXT_LLM_MODEL || "gpt-4.1-nano",
             messages: chatHistory,
         });
 
@@ -98,279 +99,107 @@ function handleAudioConnection(clientWs, user) {
     console.log(`Client connected to audio endpoint (user: ${user.username})`);
     startHeartbeat(clientWs);
 
-    const systemPrompt =
-        "Tu es un villageois du village appelé Nidalheim. Tu parles uniquement en Français. Tu es serviable, si on te pose une question, tu réponds. Lorsque tu parles, tu es le plus concis possible, une seule phrase suffit, et de préférence une courte phrase.";
+    const pipeline = new AudioPipeline(clientWs, user, {
+        deepgramKey: process.env.DEEPGRAM_API_KEY,
+        debugAudioDump: process.env.DEBUG_AUDIO_DUMP === "1",
 
-    const openaiWs = new WebSocket(
-        "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview",
-        {
-            headers: {
-                Authorization: `Bearer ${OPENAI_API_KEY}`,
-                "OpenAI-Beta": "realtime=v1",
-            },
-        },
-    );
+        ttsProvider: process.env.TTS_PROVIDER || "cartesia",
+        elevenlabsKey: process.env.ELEVENLABS_API_KEY,
+        elevenlabsVoiceId: process.env.ELEVENLABS_VOICE_ID,
+        cartesiaKey: process.env.CARTESIA_API_KEY,
+        cartesiaVoiceId: process.env.CARTESIA_VOICE_ID,
+        cartesiaModel: process.env.CARTESIA_MODEL || "sonic-2",
+        ttsLanguageCode: process.env.TTS_LANGUAGE_CODE || "fr",
 
-    let responseText = "";
-    let waitingForTranscription = false;
-
-    openaiWs.on("open", () => {
-        console.log("Connected to OpenAI Realtime API");
-
-        openaiWs.send(
-            JSON.stringify({
-                type: "session.update",
-                session: {
-                    modalities: ["text", "audio"],
-                    instructions: systemPrompt,
-                    voice: "ash",
-                    turn_detection: null,
-                    input_audio_format: "pcm16",
-                    output_audio_format: "pcm16",
-                    input_audio_transcription: {
-                        model: "whisper-1",
-                    },
-                },
-            }),
-        );
+        openaiKey: OPENAI_API_KEY,
+        llmApiKey: process.env.LLM_API_KEY || process.env.GROQ_API_KEY,
+        llmModel: process.env.LLM_MODEL || "llama-3.3-70b-versatile",
+        llmBaseUrl: process.env.LLM_BASE_URL || "https://api.groq.com/openai/v1",
     });
 
-    openaiWs.on("message", (data) => {
+    pipeline.start().catch((err) => {
+        console.error(`[pipeline ${user.username}] failed to start:`, err);
         try {
-            const event = JSON.parse(data.toString());
-
-            switch (event.type) {
-                case "session.created":
-                    console.log("OpenAI Realtime session created");
-                    break;
-
-                case "session.updated":
-                    console.log(
-                        "OpenAI Realtime session configured successfully",
-                    );
-                    console.log("Waiting for client speech...");
-                    break;
-
-                case "input_audio_buffer.speech_started":
-                    console.log("Speech detected");
-                    responseText = "";
-                    break;
-
-                case "input_audio_buffer.speech_stopped":
-                    console.log("End of speech detected");
-                    break;
-
-                case "conversation.item.input_audio_transcription.completed":
-                    console.log(`>>> TRANSCRIPTION USER: ${event.transcript}`);
-                    if (event.transcript && event.transcript.trim()) {
-                        clientWs.send(
-                            JSON.stringify({
-                                type: "user_transcript",
-                                data: event.transcript,
-                            }),
-                        );
-                    }
-                    break;
-
-                case "response.audio.delta":
-                    audioChunksSent++;
-                    const outBytes = Buffer.from(event.delta, "base64").length;
-                    if (audioChunksSent % 20 === 1) {
-                        console.log(
-                            `[AUDIO OUT] Chunk #${audioChunksSent} sent to client (${outBytes} bytes)`,
-                        );
-                    }
-                    clientWs.send(
-                        JSON.stringify({ type: "audio", data: event.delta }),
-                    );
-                    break;
-
-                case "response.audio.done":
-                    console.log("Audio response complete");
-                    break;
-
-                case "response.audio_transcript.delta":
-                    responseText += event.delta;
-                    break;
-
-                case "response.audio_transcript.done":
-                    if (responseText) {
-                        console.log(`>>> NPC RESPONSE: ${responseText}`);
-                        clientWs.send(
-                            JSON.stringify({
-                                type: "text",
-                                data: responseText,
-                            }),
-                        );
-                        responseText = "";
-                    }
-                    break;
-
-                case "response.done":
-                    console.log("Response complete");
-                    responseInProgress = false;
-                    break;
-
-                case "error":
-                    console.log(
-                        `OpenAI Realtime error: ${JSON.stringify(event.error)}`,
-                    );
-                    clientWs.send(
-                        JSON.stringify({
-                            type: "error",
-                            message: event.error.message,
-                        }),
-                    );
-                    break;
-
-                default:
-                    console.log(`[OPENAI EVENT] ${event.type}`);
-            }
-        } catch (error) {
-            console.log(`Error parsing OpenAI message: ${error}`);
-        }
+            clientWs.send(JSON.stringify({ type: "error", message: `pipeline start: ${err?.message ?? err}` }));
+        } catch (_) { /* ignore */ }
+        try { clientWs.close(); } catch (_) { /* ignore */ }
     });
-
-    openaiWs.on("error", (error) => {
-        console.log(`OpenAI WebSocket error: ${error}`);
-        clientWs.send(
-            JSON.stringify({
-                type: "error",
-                message: "OpenAI connection error",
-            }),
-        );
-    });
-
-    openaiWs.on("close", () => {
-        console.log("Disconnected from OpenAI Realtime API");
-    });
-
-    let audioChunksReceived = 0;
-    let audioChunksSent = 0;
-    let audioChunksSinceLastCommit = 0;
-    let responseInProgress = false;
 
     clientWs.on("message", (message) => {
-        const messageStr = message.toString().trim();
-
-        if (messageStr === "COMMIT" || messageStr.includes("COMMIT")) {
-            if (audioChunksSinceLastCommit < 10) {
-                console.log(
-                    `[AUDIO] Commit ignored - not enough audio (${audioChunksSinceLastCommit} chunks)`,
-                );
-                return;
-            }
-
-            if (responseInProgress) {
-                console.log(
-                    `[AUDIO] Commit received but response already in progress`,
-                );
-                return;
-            }
-
-            console.log(
-                `[AUDIO] Commit received - triggering response (${audioChunksSinceLastCommit} chunks)`,
-            );
-            if (openaiWs.readyState === WebSocket.OPEN) {
-                openaiWs.send(
-                    JSON.stringify({
-                        type: "input_audio_buffer.commit",
-                    }),
-                );
-                openaiWs.send(
-                    JSON.stringify({
-                        type: "response.create",
-                    }),
-                );
-                responseInProgress = true;
-                audioChunksSinceLastCommit = 0;
-            }
+        const str = message.toString();
+        if (str === "COMMIT" || str.includes("COMMIT")) {
+            pipeline.onClientCommit();
             return;
         }
-
-        if (messageStr.length < 100) {
-            console.log(
-                `[AUDIO] Skipping short message: "${messageStr.substring(0, 50)}"`,
-            );
-            return;
-        }
-
-        const audioBase64 = messageStr;
-        audioChunksReceived++;
-        audioChunksSinceLastCommit++;
-
-        const audioBytes = Buffer.from(audioBase64, "base64").length;
-
-        if (audioChunksReceived === 1) {
-            console.log(`[AUDIO IN] First chunk received! (${audioBytes} bytes)`);
-        }
-        if (audioChunksReceived % 100 === 0) {
-            console.log(
-                `[AUDIO IN] Chunk #${audioChunksReceived} (${audioBytes} bytes)`,
-            );
-        }
-
-        if (openaiWs.readyState === WebSocket.OPEN) {
-            openaiWs.send(
-                JSON.stringify({
-                    type: "input_audio_buffer.append",
-                    audio: audioBase64,
-                }),
-            );
-        } else {
-            if (audioChunksReceived === 1) {
-                console.log(
-                    `[WARNING] OpenAI WebSocket not open yet, dropping audio`,
-                );
-            }
+        if (str.length < 100) return; // ignore tiny control frames
+        try {
+            const pcm = Buffer.from(str, "base64");
+            if (pcm.length > 0) pipeline.onClientAudio(pcm);
+        } catch (err) {
+            console.warn(`[pipeline ${user.username}] audio decode error:`, err?.message ?? err);
         }
     });
 
     clientWs.on("close", () => {
         console.log(`Client disconnected from audio endpoint (user: ${user.username})`);
-        if (openaiWs.readyState === WebSocket.OPEN) {
-            openaiWs.close();
-        }
+        pipeline.shutdown();
     });
 
-    clientWs.on("error", (error) => {
-        console.log(`Audio client WebSocket error: ${error}`);
+    clientWs.on("error", (err) => {
+        console.log(`Audio client WebSocket error: ${err?.message ?? err}`);
+        pipeline.shutdown();
     });
 }
 
 function main() {
-    const server = http.createServer();
+    const server = http.createServer((req, res) => {
+        // Plain HTTP hit on the WS server — log and 426 it so operators notice.
+        const ip = req.socket.remoteAddress;
+        console.log(`[http ${ip}] ${req.method} ${req.url} — not a WebSocket upgrade, rejecting`);
+        res.writeHead(426, { "Content-Type": "text/plain", "Upgrade": "websocket" });
+        res.end("Upgrade Required");
+    });
+
     const wss = new WebSocketServer({ noServer: true });
 
     server.on("upgrade", (request, socket, head) => {
+        const ip = request.socket.remoteAddress;
+        const fwd = request.headers["x-forwarded-for"];
+        const clientIp = typeof fwd === "string" && fwd.length > 0 ? fwd.split(",")[0].trim() : ip;
         const url = new URL(request.url, `http://${request.headers.host}`);
+        const path = url.pathname;
         const token = url.searchParams.get("token");
 
+        console.log(`[upgrade ${clientIp}] ${request.method} ${request.url} (host=${request.headers.host})`);
+
         if (!token) {
-            console.log("Connection refused: missing token");
+            console.log(`[auth ${clientIp}] REJECTED ${path}: missing token`);
             socket.destroy();
             return;
         }
 
+        const tokenPreview = `${token.slice(0, 12)}…${token.slice(-6)}`;
         let user;
         try {
             user = verifyToken(token);
         } catch (err) {
-            console.log(`Connection refused: invalid token (${err.message})`);
+            console.log(`[auth ${clientIp}] REJECTED ${path}: invalid token (${tokenPreview}) — ${err.message}`);
             socket.destroy();
             return;
         }
 
-        if (url.pathname === "/text") {
+        console.log(`[auth ${clientIp}] OK ${path} user=${user.username} (sub=${user.sub}) token=${tokenPreview}`);
+
+        if (path === "/text") {
             wss.handleUpgrade(request, socket, head, (ws) => {
                 handleTextConnection(ws, user);
             });
-        } else if (url.pathname === "/audio") {
+        } else if (path === "/audio") {
             wss.handleUpgrade(request, socket, head, (ws) => {
                 handleAudioConnection(ws, user);
             });
         } else {
-            console.log(`Connection refused for URL: ${url.pathname}`);
+            console.log(`[auth ${clientIp}] REJECTED ${path}: unknown endpoint (user=${user.username})`);
             socket.destroy();
         }
     });
@@ -378,6 +207,7 @@ function main() {
     const port = process.env.PORT || 3002;
     server.listen(port, "0.0.0.0", () => {
         console.log(`Internal binding: ws://localhost:${port}`);
+
         console.log(`Available endpoints:`);
         console.log(`/text`);
         console.log(`/audio`);
