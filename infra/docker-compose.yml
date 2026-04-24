@@ -1,6 +1,6 @@
 services:
   nidalheim-site:
-    image: ghcr.io/epitechpromo2027/nidalheim-site:${IMAGE_TAG:-latest}
+    image: ghcr.io/zarrock77/nidalheim-site:${IMAGE_TAG:-latest}
     build:
       context: ../web/site
       dockerfile: Dockerfile
@@ -13,7 +13,7 @@ services:
       - nidalheim-network
 
   nidalheim-docs:
-    image: ghcr.io/epitechpromo2027/nidalheim-docs:${IMAGE_TAG:-latest}
+    image: ghcr.io/zarrock77/nidalheim-docs:${IMAGE_TAG:-latest}
     build:
       context: ../web/docs
       dockerfile: Dockerfile
@@ -27,7 +27,7 @@ services:
       - nidalheim-network
 
   api-auth:
-    image: ghcr.io/epitechpromo2027/nidalheim-api-auth:${IMAGE_TAG:-latest}
+    image: ghcr.io/zarrock77/nidalheim-api-auth:${IMAGE_TAG:-latest}
     build:
       context: ../services/api-auth
       dockerfile: Dockerfile
@@ -48,7 +48,7 @@ services:
       - nidalheim-network
 
   api-game:
-    image: ghcr.io/epitechpromo2027/nidalheim-api-game:${IMAGE_TAG:-latest}
+    image: ghcr.io/zarrock77/nidalheim-api-game:${IMAGE_TAG:-latest}
     build:
       context: ../services/api-game
       dockerfile: Dockerfile
@@ -90,7 +90,7 @@ services:
       - nidalheim-network
 
   db-migrate:
-    image: ghcr.io/epitechpromo2027/nidalheim-db-migrate:${IMAGE_TAG:-latest}
+    image: ghcr.io/zarrock77/nidalheim-db-migrate:${IMAGE_TAG:-latest}
     build:
       context: ../services/db
       dockerfile: Dockerfile

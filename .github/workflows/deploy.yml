@@ -7,7 +7,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_PREFIX: ghcr.io/epitechpromo2027/nidalheim
+  IMAGE_PREFIX: ghcr.io/zarrock77/nidalheim
 
 jobs:
   build:
@@ -87,8 +87,6 @@ jobs:
             AUTH_SECRET=${{ secrets.AUTH_SECRET }}
             JWT_SECRET=${{ secrets.JWT_SECRET }}
             ENVEOF
-
-            echo "${{ secrets.GHCR_PULL_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
             cd infra
             docker compose pull
