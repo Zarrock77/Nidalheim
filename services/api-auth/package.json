@@ -5,8 +5,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsx watch src/index.ts",
-    "generate-keys": "tsx src/scripts/generate-keys.ts"
+    "dev": "tsx watch src/index.ts"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",

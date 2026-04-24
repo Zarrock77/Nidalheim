@@ -5,18 +5,18 @@ import { ConversationStore } from "./conversationStore.js";
 import { SYSTEM_PROMPT } from "./systemPrompt.js";
 import http from "http";
 import jwt from "jsonwebtoken";
-import { readFileSync } from "fs";
 import { config } from "dotenv";
 
-config();
+config({ path: "../../infra/.env" });
 
-const JWT_PUBLIC_KEY = readFileSync(
-  process.env.JWT_PUBLIC_KEY_PATH || "./keys/public.pem",
-  "utf8"
-);
+const JWT_SECRET = process.env.JWT_SECRET;
+
+if (!JWT_SECRET) {
+  throw new Error("JWT_SECRET is required");
+}
 
 function verifyToken(token) {
-  return jwt.verify(token, JWT_PUBLIC_KEY, { algorithms: ["RS256"] });
+  return jwt.verify(token, JWT_SECRET, { algorithms: ["HS256"] });
 }
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;

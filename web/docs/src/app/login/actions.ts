@@ -1,6 +1,6 @@
 "use server";
 
-import { signIn } from "@/lib/auth";
+import { signIn, signOut } from "@/lib/auth";
 import { redirect } from "next/navigation";
 
 export async function login(formData: FormData) {
@@ -15,4 +15,9 @@ export async function login(formData: FormData) {
   }
 
   redirect("/");
+}
+
+export async function logout() {
+  await signOut({ redirect: false });
+  redirect("/login");
 }

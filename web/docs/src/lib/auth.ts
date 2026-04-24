@@ -1,5 +1,6 @@
 import NextAuth from "next-auth";
 import Credentials from "next-auth/providers/credentials";
+import { NextResponse } from "next/server";
 
 const AUTH_API_URL = process.env.AUTH_API_URL || "http://localhost:3001";
 
@@ -31,6 +32,7 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
           id: data.user.id,
           name: data.user.username,
           email: data.user.email,
+          role: data.user.role,
           accessToken: data.accessToken,
           refreshToken: data.refreshToken,
         };
@@ -38,19 +40,26 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
     }),
   ],
   callbacks: {
-    authorized({ auth }) {
-      return !!auth?.user;
+    authorized({ auth, request }) {
+      if (!auth?.user) return false;
+      if (auth.user.role !== "admin") {
+        const url = new URL("/login?error=forbidden", request.nextUrl);
+        return NextResponse.redirect(url);
+      }
+      return true;
     },
     async jwt({ token, user }) {
       if (user) {
         token.id = user.id;
-        token.accessToken = (user as Record<string, unknown>).accessToken;
-        token.refreshToken = (user as Record<string, unknown>).refreshToken;
+        token.role = user.role;
+        token.accessToken = user.accessToken;
+        token.refreshToken = user.refreshToken;
       }
       return token;
     },
     async session({ session, token }) {
-      session.user.id = token.id as string;
+      if (token.id) session.user.id = token.id;
+      session.user.role = token.role;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (session as any).accessToken = token.accessToken;
       return session;

@@ -1,5 +1,6 @@
 services:
   nidalheim-site:
+    image: ghcr.io/epitechpromo2027/nidalheim-site:${IMAGE_TAG:-latest}
     build:
       context: ../web/site
       dockerfile: Dockerfile
@@ -11,6 +12,7 @@ services:
       - nidalheim-network
 
   nidalheim-docs:
+    image: ghcr.io/epitechpromo2027/nidalheim-docs:${IMAGE_TAG:-latest}
     build:
       context: ../web/docs
       dockerfile: Dockerfile
@@ -24,6 +26,7 @@ services:
       - nidalheim-network
 
   api-auth:
+    image: ghcr.io/epitechpromo2027/nidalheim-api-auth:${IMAGE_TAG:-latest}
     build:
       context: ../services/api-auth
       dockerfile: Dockerfile
@@ -32,15 +35,11 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3001
-      - JWT_PRIVATE_KEY_PATH=/run/secrets/jwt_private_key
-      - JWT_PUBLIC_KEY_PATH=/run/secrets/jwt_public_key
+      - JWT_SECRET=${JWT_SECRET}
       - JWT_ACCESS_TOKEN_EXPIRY=15m
       - JWT_REFRESH_TOKEN_EXPIRY=7d
       - REDIS_URL=redis://redis:6379
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-    secrets:
-      - jwt_private_key
-      - jwt_public_key
     depends_on:
       - redis
       - postgres
@@ -48,6 +47,7 @@ services:
       - nidalheim-network
 
   api-game:
+    image: ghcr.io/epitechpromo2027/nidalheim-api-game:${IMAGE_TAG:-latest}
     build:
       context: ../services/api-game
       dockerfile: Dockerfile
@@ -57,9 +57,19 @@ services:
       - NODE_ENV=production
       - PORT=3002
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - JWT_PUBLIC_KEY_PATH=/run/secrets/jwt_public_key
-    secrets:
-      - jwt_public_key
+      - JWT_SECRET=${JWT_SECRET}
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_BASE_URL=${LLM_BASE_URL:-https://api.groq.com/openai/v1}
+      - LLM_MODEL=${LLM_MODEL:-llama-3.1-8b-instant}
+      - TTS_PROVIDER=${TTS_PROVIDER:-cartesia}
+      - CARTESIA_API_KEY=${CARTESIA_API_KEY}
+      - CARTESIA_VOICE_ID=${CARTESIA_VOICE_ID}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - ELEVENLABS_VOICE_ID=${ELEVENLABS_VOICE_ID}
+    depends_on:
+      - postgres
     networks:
       - nidalheim-network
 
@@ -79,6 +89,7 @@ services:
       - nidalheim-network
 
   db-migrate:
+    image: ghcr.io/epitechpromo2027/nidalheim-db-migrate:${IMAGE_TAG:-latest}
     build:
       context: ../services/db
       dockerfile: Dockerfile
@@ -117,12 +128,6 @@ services:
       - nidalheim-docs
       - api-auth
       - api-game
-
-secrets:
-  jwt_private_key:
-    file: ../services/api-auth/keys/private.pem
-  jwt_public_key:
-    file: ../services/api-auth/keys/public.pem
 
 volumes:
   postgres-data:

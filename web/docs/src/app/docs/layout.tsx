@@ -18,9 +18,10 @@ export default async function DocsLayout({
   return (
     <Layout
       navbar={navbar}
-      pageMap={await getPageMap()}
-      docsRepositoryBase="https://github.com/nidalheim/nidalheim/tree/main/docs"
+      pageMap={await getPageMap('/docs')}
+      docsRepositoryBase="https://github.com/EpitechPromo2027/G-EIP-600-PAR-6-1-eip-merwan.korkmaz"
       footer={footer}
+      search={null}
     >
       {children}
     </Layout>

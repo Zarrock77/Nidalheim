@@ -1,6 +1,65 @@
+@import url("https://fonts.googleapis.com/css2?family=Cinzel:wght@400;500;600;700&family=Inter:wght@300;400;500;600&display=swap");
 @import "tailwindcss";
 
 /* Optional: import Nextra theme styles */
 @import "nextra-theme-docs/style.css"; /* or nextra-theme-blog/style.css */
 
 @variant dark (&:where(.dark *));
+
+/* Reverse border-radius — concave quarter-circle cuts at each corner. Shared
+   visual language with web/site. */
+.reverse-radius {
+  --rr: 12px;
+  -webkit-mask:
+    radial-gradient(circle var(--rr) at 0 0, transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) top left / 50.5% 50.5% no-repeat,
+    radial-gradient(circle var(--rr) at 100% 0, transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) top right / 50.5% 50.5% no-repeat,
+    radial-gradient(circle var(--rr) at 0 100%, transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) bottom left / 50.5% 50.5% no-repeat,
+    radial-gradient(circle var(--rr) at 100% 100%, transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) bottom right / 50.5% 50.5% no-repeat;
+  mask:
+    radial-gradient(circle var(--rr) at 0 0, transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) top left / 50.5% 50.5% no-repeat,
+    radial-gradient(circle var(--rr) at 100% 0, transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) top right / 50.5% 50.5% no-repeat,
+    radial-gradient(circle var(--rr) at 0 100%, transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) bottom left / 50.5% 50.5% no-repeat,
+    radial-gradient(circle var(--rr) at 100% 100%, transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) bottom right / 50.5% 50.5% no-repeat;
+}
+
+.reverse-radius-sm {
+  --rr: 7px;
+  -webkit-mask:
+    radial-gradient(circle var(--rr) at 0 0, transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) top left / 50.5% 50.5% no-repeat,
+    radial-gradient(circle var(--rr) at 100% 0, transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) top right / 50.5% 50.5% no-repeat,
+    radial-gradient(circle var(--rr) at 0 100%, transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) bottom left / 50.5% 50.5% no-repeat,
+    radial-gradient(circle var(--rr) at 100% 100%, transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) bottom right / 50.5% 50.5% no-repeat;
+  mask:
+    radial-gradient(circle var(--rr) at 0 0, transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) top left / 50.5% 50.5% no-repeat,
+    radial-gradient(circle var(--rr) at 100% 0, transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) top right / 50.5% 50.5% no-repeat,
+    radial-gradient(circle var(--rr) at 0 100%, transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) bottom left / 50.5% 50.5% no-repeat,
+    radial-gradient(circle var(--rr) at 100% 100%, transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) bottom right / 50.5% 50.5% no-repeat;
+}
+
+.reverse-radius-inner {
+  --rr: 13px;
+  -webkit-mask:
+    radial-gradient(circle var(--rr) at -1px -1px, transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) top left / 50.5% 50.5% no-repeat,
+    radial-gradient(circle var(--rr) at calc(100% + 1px) -1px, transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) top right / 50.5% 50.5% no-repeat,
+    radial-gradient(circle var(--rr) at -1px calc(100% + 1px), transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) bottom left / 50.5% 50.5% no-repeat,
+    radial-gradient(circle var(--rr) at calc(100% + 1px) calc(100% + 1px), transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) bottom right / 50.5% 50.5% no-repeat;
+  mask:
+    radial-gradient(circle var(--rr) at -1px -1px, transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) top left / 50.5% 50.5% no-repeat,
+    radial-gradient(circle var(--rr) at calc(100% + 1px) -1px, transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) top right / 50.5% 50.5% no-repeat,
+    radial-gradient(circle var(--rr) at -1px calc(100% + 1px), transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) bottom left / 50.5% 50.5% no-repeat,
+    radial-gradient(circle var(--rr) at calc(100% + 1px) calc(100% + 1px), transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) bottom right / 50.5% 50.5% no-repeat;
+}
+
+.reverse-radius-sm-inner {
+  --rr: 8px;
+  -webkit-mask:
+    radial-gradient(circle var(--rr) at -1px -1px, transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) top left / 50.5% 50.5% no-repeat,
+    radial-gradient(circle var(--rr) at calc(100% + 1px) -1px, transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) top right / 50.5% 50.5% no-repeat,
+    radial-gradient(circle var(--rr) at -1px calc(100% + 1px), transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) bottom left / 50.5% 50.5% no-repeat,
+    radial-gradient(circle var(--rr) at calc(100% + 1px) calc(100% + 1px), transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) bottom right / 50.5% 50.5% no-repeat;
+  mask:
+    radial-gradient(circle var(--rr) at -1px -1px, transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) top left / 50.5% 50.5% no-repeat,
+    radial-gradient(circle var(--rr) at calc(100% + 1px) -1px, transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) top right / 50.5% 50.5% no-repeat,
+    radial-gradient(circle var(--rr) at -1px calc(100% + 1px), transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) bottom left / 50.5% 50.5% no-repeat,
+    radial-gradient(circle var(--rr) at calc(100% + 1px) calc(100% + 1px), transparent calc(var(--rr) - 0.5px), #000 calc(var(--rr) + 0.5px)) bottom right / 50.5% 50.5% no-repeat;
+}

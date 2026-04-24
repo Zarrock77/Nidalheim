@@ -54,7 +54,7 @@ export async function authenticateUser(
   password: string
 ): Promise<User> {
   const { rows } = await pool.query<UserRow>(
-    'SELECT id, username, email, password_hash, role FROM users WHERE username = $1',
+    'SELECT id, username, email, password_hash, role FROM users WHERE username = $1 OR email = $1',
     [username]
   );
 

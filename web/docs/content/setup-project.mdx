@@ -1,0 +1,61 @@
+# Setup du projet
+
+## Prérequis
+
+- Node.js 20+
+- pnpm 10+ (pour `web/*`, `services/api-game`, `services/db`)
+- npm (pour `services/api-auth`)
+- Docker + Docker Compose
+
+## Premier run
+
+```bash
+# 1. Variables d'env
+cp infra/.env.example infra/.env
+# puis renseigner OPENAI_API_KEY, POSTGRES_*, AUTH_SECRET, clés voice, etc.
+
+# 2. Infra locale (Postgres + Redis)
+cd infra && docker compose up -d postgres redis
+
+# 3. Clés JWT pour api-auth
+cd services/api-auth
+npm install
+npm run generate-keys
+
+# 4. Migrations DB
+cd services/db
+pnpm install
+pnpm migrate
+
+# 5. Installer les deps restantes
+cd services/api-game && pnpm install
+cd web/docs && pnpm install
+cd web/site && pnpm install
+```
+
+## Lancer les services (chacun dans son terminal)
+
+```bash
+# API REST auth
+cd services/api-auth && npm run dev      # :3001
+
+# API WebSocket game
+cd services/api-game && pnpm start       # :3002
+
+# Site vitrine (register/login)
+cd web/site && pnpm dev                  # :3000
+
+# Docs (ce que tu es en train de lire)
+cd web/docs && pnpm dev                  # :3000
+```
+
+## Accès admin aux docs
+
+Le middleware de `web/docs` exige `role === "admin"`. Après register sur le site,
+promouvoir ton user :
+
+```sql
+UPDATE users SET role = 'admin' WHERE username = 'ton_username';
+```
+
+Via Drizzle Studio : `cd services/db && pnpm studio`.
