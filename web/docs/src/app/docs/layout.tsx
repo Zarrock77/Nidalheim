@@ -21,7 +21,6 @@ export default async function DocsLayout({
       pageMap={await getPageMap('/docs')}
       docsRepositoryBase="https://github.com/EpitechPromo2027/G-EIP-600-PAR-6-1-eip-merwan.korkmaz"
       footer={footer}
-      search={null}
     >
       {children}
     </Layout>
