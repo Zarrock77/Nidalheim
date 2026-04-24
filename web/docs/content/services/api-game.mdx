@@ -1,0 +1,111 @@
+---
+title: api-game
+---
+
+# api-game
+
+Service WebSocket temps-réel pour les PNJ IA. JavaScript ESM + pnpm.
+Écoute sur le port **3002**.
+
+## Deux endpoints
+
+Les deux acceptent un JWT via query param : `ws://api-game/<endpoint>?token=<accessToken>`.
+L'auth échoue (destroy socket) si :
+- le token est manquant
+- le JWT ne vérifie pas avec `JWT_SECRET` (HS256)
+
+### `/text` — chat LLM simple
+
+Echange texte ↔ texte. Adapté pour des dialogues PNJ rapides sans audio.
+
+**Client → Server** : texte brut (UTF-8), une utterance par frame.
+
+**Server → Client** : texte brut (UTF-8), la réponse complète du LLM.
+
+**Modèle LLM** : Groq Llama 3.1 8B par défaut (override via `LLM_MODEL`).
+
+**Historique** : les 20 derniers tours sont chargés depuis la table `chat_messages` au début de la session et injectés dans les `messages` envoyés au LLM. Chaque tour complet (user + assistant) est persisté en transaction.
+
+### `/audio` — voice chat streaming
+
+Pipeline `STT → LLM → TTS` streaming bout-en-bout. Latency target : **first audio chunk < 1s** après fin d'élocution.
+
+**Client → Server** (JSON ou binaire) :
+- JSON `{ type: "audio_config", sample_rate: 48000, device: "...", bluetooth_hfp: false }`
+  → première frame obligatoire, permet à Deepgram d'être ouvert au bon sample rate dès le premier chunk PCM
+- PCM 16-bit LE base64 — une trame par chunk audio
+- `"COMMIT"` → force la finalisation de l'utterance courante (bouton relâché, push-to-talk)
+
+**Server → Client** (JSON) :
+- `{ type: "user_transcript_partial", data: "bonj..." }` — transcript interim Deepgram
+- `{ type: "user_transcript", data: "bonjour" }` — transcript final
+- `{ type: "text", data: "<NPC reply>" }` — réponse complète du LLM
+- `{ type: "audio", data: "<base64-pcm>" }` — chunks audio TTS streaming
+- `{ type: "error", message: "..." }` — erreur d'un composant du pipeline
+
+## Pipeline voice en détail
+
+Voir **[Voice pipeline](/docs/voice-pipeline)** pour le détail complet.
+
+Résumé du flow :
+
+```
+client PCM ──▶ Deepgram WS (STT) ──▶ LLM stream (Groq/Llama) ──▶ TTS stream (Cartesia) ──▶ client PCM
+```
+
+## Historique persistant
+
+Les deux endpoints (`/text` et `/audio`) partagent la même table `chat_messages` via `ConversationStore`. Un utilisateur qui bascule entre voice et text retrouve son historique.
+
+**Schéma** (géré par Drizzle, voir [`services/db`](/docs/services/database#chat_messages)) :
+
+```sql
+CREATE TABLE chat_messages (
+  id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id    uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role       varchar(20) NOT NULL,   -- 'user' | 'assistant'
+  content    text NOT NULL,
+  channel    varchar(20),            -- 'text' | 'audio'
+  created_at timestamp NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_chat_messages_user_created ON chat_messages(user_id, created_at);
+```
+
+Insertion : les tours user + assistant sont insérés **en transaction** pour éviter un état désynchronisé si le process crash entre les deux.
+
+## Heartbeat
+
+`ws.ping()` toutes les **30s** tant que la socket est `OPEN`. Pas de message applicatif — le heartbeat sert juste à keep-alive pour les proxys (nginx `proxy_read_timeout 86400s`).
+
+## Variables d'env
+
+| Variable | Rôle |
+|----------|------|
+| `PORT` | Port d'écoute (default `3002`) |
+| `JWT_SECRET` | Secret HS256 partagé avec `api-auth` |
+| `DATABASE_URL` | Postgres pour `chat_messages` |
+| `DEEPGRAM_API_KEY` | STT |
+| `LLM_API_KEY` | Clé Groq (fallback `GROQ_API_KEY`) |
+| `LLM_BASE_URL` | Default `https://api.groq.com/openai/v1` |
+| `LLM_MODEL` | Default `llama-3.1-8b-instant` (`/text`) ou `llama-3.3-70b-versatile` (`/audio`) |
+| `TTS_PROVIDER` | `cartesia` (default) ou `elevenlabs` |
+| `CARTESIA_API_KEY` / `CARTESIA_VOICE_ID` / `CARTESIA_MODEL` | Cartesia TTS |
+| `ELEVENLABS_API_KEY` / `ELEVENLABS_VOICE_ID` | ElevenLabs TTS (fallback) |
+| `TTS_LANGUAGE_CODE` | Default `fr` |
+| `DEBUG_AUDIO_DUMP` | Si `1`, dump le PCM reçu dans `/tmp/nidalheim-audio-*.raw` (dev only) |
+
+## Structure du code
+
+```
+services/api-game/src/
+├── index.js                  # Point d'entrée : ws server + auth + routing /text vs /audio
+├── audioPipeline.js          # Orchestration STT → LLM → TTS pour /audio
+├── conversationStore.js      # Persistence chat_messages (loadRecent, appendTurn)
+├── db.js                     # Pool pg lazy (throw si DATABASE_URL manquant)
+├── systemPrompt.js           # Le prompt système partagé text + audio
+└── providers/
+    ├── deepgram.js           # DeepgramStreamingSTT (WS → transcripts)
+    ├── cartesia.js           # CartesiaStreamingTTS (WS persistant → PCM)
+    ├── elevenlabs.js         # ElevenLabsStreamingTTS (WS per-turn → PCM)
+    └── llm.js                # LLMStreaming (OpenAI SDK Groq-compat, streaming)
+```

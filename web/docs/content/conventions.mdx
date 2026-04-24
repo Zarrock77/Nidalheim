@@ -1,0 +1,164 @@
+---
+title: Conventions
+---
+
+# Conventions
+
+## Style de code
+
+| Règle | Valeur |
+|-------|--------|
+| Quotes | `"` double quotes |
+| Semicolons | Oui, toujours |
+| Indentation | 2 espaces |
+| Line endings | LF préférés (mais mixtes actuellement — CRLF toléré) |
+| Max line length | Pas imposé, garder ~100 raisonnable |
+| Trailing commas | Oui (ES2017+) |
+
+## TypeScript
+
+- **Strict** activé partout (sauf `services/api-game` qui est JS ESM pur)
+- `noImplicitAny`, `strictNullChecks`, etc. par défaut
+- Import de fichiers locaux : extension `.js` explicite en backend ESM
+  ```ts
+  // services/api-auth/src/index.ts
+  import registerRoute from './routes/register.js';   // ← .js obligatoire en ESM/Node
+  ```
+- Frontend : alias `@/` vers `src/`
+  ```ts
+  import { auth } from "@/lib/auth";
+  ```
+
+## Naming
+
+| Élément | Convention | Exemple |
+|---------|-----------|---------|
+| Variables / fonctions | `camelCase` | `signAccessToken`, `userId` |
+| Classes / composants React | `PascalCase` | `AudioPipeline`, `Navigation` |
+| Constantes | `UPPER_SNAKE_CASE` | `JWT_SECRET`, `KEEPALIVE_INTERVAL_MS` |
+| Fichiers TS (code) | `camelCase.ts` | `jwt.ts`, `loadEnv.ts` |
+| Fichiers composants React | `PascalCase.tsx` | `Navigation.tsx`, `AuthForm.tsx` |
+| Fichiers schema Drizzle | `kebab-case.ts` | `player-profiles.ts` |
+| Tables SQL | `snake_case` | `player_profiles`, `chat_messages` |
+
+## Git
+
+### Branches
+- `main` — auto-deploy
+- Feature branches : `feat/<short-desc>` ou `fix/<short-desc>` (pas enforced)
+
+### Commits — conventional commits
+
+| Prefix | Usage |
+|--------|-------|
+| `feat:` | Nouvelle fonctionnalité |
+| `fix:` | Bug fix |
+| `refactor:` | Refactor sans changement fonctionnel |
+| `docs:` | Doc uniquement |
+| `chore:` | Maintenance (deps, config, CI) |
+| `ci:` | Changement CI/CD |
+| `perf:` | Optim perf |
+
+Format :
+```
+<type>: <description courte (impératif, ≤70 chars)>
+
+[body optionnel — expliquer le POURQUOI, pas le QUOI]
+```
+
+### Ne pas committer
+
+`.env`, `keys/`, `node_modules/`, `dist/`, `.next/`, `.claude/`, fichiers générés.
+
+## Package managers
+
+| Package | Manager |
+|---------|---------|
+| `services/api-auth` | **npm** |
+| `services/api-game` | pnpm |
+| `services/db` | pnpm |
+| `web/site` | pnpm |
+| `web/docs` | pnpm |
+
+Pas de workspace racine — chaque package installe ses deps localement.
+
+**Pourquoi npm sur api-auth ?** Historique — pas de raison forte. À migrer vers pnpm au prochain refactor deps si l'envie s'en fait sentir.
+
+## React / Next.js
+
+- **Server components par défaut** — `"use client"` uniquement si interaction ou hook client nécessaire
+- Garder les `"use client"` au plus bas niveau possible (feuille de l'arbre)
+- Pas de librairie de state manager externe (Redux / Zustand) — React state + server components suffisent
+- Tailwind pour le styling — pas de CSS modules sauf cas particulier
+
+## Conventions backend
+
+- **Express 5** avec async route handlers (Express 5 supporte les Promises nativement)
+- **Pas de framework de DI** — injection par imports directs
+- **Pas de repositories pattern** — le SQL raw (`pool.query`) est OK pour un projet de cette taille
+- **Drizzle uniquement pour le schéma** — les services runtime (`api-auth`) font du SQL direct via `pg`
+
+## ESM imports en backend
+
+```ts
+// ✅ Bon — extension .js explicite
+import { signAccessToken } from "./services/jwt.js";
+
+// ❌ Mauvais — ESM strict refuse d'omettre l'extension
+import { signAccessToken } from "./services/jwt";
+```
+
+Rappel : on est en TypeScript qui compile en ESM, pas en CommonJS.
+
+## Commentaires
+
+- **Peu de commentaires** — le code bien nommé est autodoc
+- Commenter **le pourquoi**, jamais le **quoi**
+- Éviter les commentaires d'historique (`// Fix for ticket #123`) — c'est le rôle du git log
+- JSDoc uniquement pour les fonctions exportées dont la signature n'est pas évidente
+
+Exemple acceptable :
+```js
+// Buffer incoming PCM until the client has told us its capture sample rate
+// (prevents Deepgram from being fed audio at the wrong rate on the first chunks).
+this._awaitingFirstConfig = true;
+```
+
+## Logs
+
+- `console.log` / `console.warn` / `console.error` — pas de logger structuré pour l'instant
+- Préfixe entre crochets pour identifier le sous-système :
+  ```
+  [Redis] Connected
+  [pipeline Zarrock] first audio chunk
+  [auth 192.168.1.1] REJECTED /audio: invalid token
+  ```
+
+## Tests
+
+⚠️ **Aucun test configuré actuellement.** Pas de framework en place (ni Jest, ni Vitest, ni pytest).
+
+Si tu ajoutes des tests :
+- Vitest pour les packages TypeScript
+- Node `--test` pour `api-game` (éviter d'ajouter une dep si possible)
+- Playwright pour les tests e2e web
+
+## ESLint / Prettier
+
+- **ESLint** : activé sur `web/site` et `web/docs` uniquement (`eslint-config-next`)
+- **Pas d'ESLint** sur les services backend
+- **Pas de Prettier** configuré — relire à l'œil et garder cohérent avec le code existant
+
+## Docker
+
+- Base images `node:22-slim` partout
+- Multi-stage build : `base → dependencies → build → run`
+- User non-root dans l'étape `run` (`addgroup + adduser --uid 1001`)
+- `WORKDIR /app`, ne pas copier `.git` ni les `.env`
+
+## Env vars
+
+- **Une seule source de vérité** : `infra/.env` (gitignored)
+- Les services chargent via `config({ path: '../../infra/.env' })` en dev
+- En Docker, les vars passent par `environment:` dans le compose, `.env` à la racine de `infra/`
+- Les frontends Next.js ont en plus leurs propres `.env.local` (pour `NEXT_PUBLIC_*` build-time)

@@ -1,0 +1,124 @@
+---
+title: Architecture
+---
+
+# Architecture
+
+Vue d'ensemble du système Nidalheim et des flux entre composants.
+
+## Monorepo
+
+```
+nidalheim/
+├── services/
+│   ├── api-auth/      # Express 5 REST (auth)
+│   ├── api-game/      # ws WebSocket (IA temps-réel)
+│   ├── db/            # Drizzle schéma + migrations
+│   └── p4d/           # Perforce (assets UE5) — hors compose
+├── web/
+│   ├── site/          # Next.js vitrine
+│   └── docs/          # Nextra docs admin
+└── infra/
+    ├── docker-compose.yml
+    ├── nginx/         # reverse proxy
+    └── .env.example
+```
+
+Pas de workspace racine — chaque package gère ses deps indépendamment (mixed `pnpm`/`npm`).
+
+## Diagramme des flux
+
+```
+┌─────────────┐      POST /register             ┌──────────────┐
+│  web/site   │ ───────────────────────────▶   │              │
+│  (Next.js)  │ ◀─ { accessToken, refresh } ──  │   api-auth   │
+└─────────────┘                                 │  (Express)   │
+                                                │              │
+┌─────────────┐      POST /login                │              │
+│  web/docs   │ ───────────────────────────▶   │              │
+│  (NextAuth) │ ◀─ { user, accessToken } ─────  │              │
+└─────────────┘                                 └──────┬───────┘
+                                                       │
+                                                       │ bcrypt + SQL
+                                                       ▼
+┌─────────────┐       WS ?token=<JWT>           ┌──────────────┐
+│   UE5 game  │ ───────────────────────────▶   │              │
+│  (client)   │ ◀─ JSON frames / PCM audio ───  │   api-game   │
+└─────────────┘                                 │   (ws + IA)  │
+                                                │              │
+                                                └──────┬───────┘
+                                                       │
+                    ┌──────────────────────────────────┼──────────────────┐
+                    ▼                                  ▼                  ▼
+             ┌──────────────┐                   ┌─────────────┐    ┌────────────┐
+             │  PostgreSQL  │                   │   Deepgram  │    │  Cartesia  │
+             │  + Redis     │                   │    (STT)    │    │   (TTS)    │
+             └──────────────┘                   └─────────────┘    └────────────┘
+                                                       │
+                                                       ▼
+                                                ┌─────────────┐
+                                                │    Groq     │
+                                                │ (Llama LLM) │
+                                                └─────────────┘
+```
+
+## Services
+
+| Service | Runtime | Port | Responsabilité |
+|---------|---------|------|---------------|
+| `api-auth` | Node 22 / TS | 3001 | Register, login, refresh, logout — JWT HS256 |
+| `api-game` | Node 22 / JS ESM | 3002 | WebSocket `/text` et `/audio` — PNJ IA |
+| `db-migrate` | one-shot | — | Applique les migrations Drizzle |
+| `nidalheim-site` | Next.js 16 | 3000 | Site vitrine + register/login UI |
+| `nidalheim-docs` | Next.js 16 | 3000 | Documentation admin-only |
+| `postgres` | Postgres 16 | 5432 | Users, player profiles, chat history |
+| `redis` | Redis 7 | 6379 | Refresh tokens (TTL 7j avec rotation) |
+| `nginx` | nginx alpine | 80 | Reverse proxy vers les 4 sous-domaines |
+
+## Reverse proxy (Nginx)
+
+Un seul conteneur Nginx route vers les 4 domaines :
+
+```
+www.nidalheim.com       → nidalheim-site:3000
+docs.nidalheim.com      → nidalheim-docs:3000
+api-auth.nidalheim.com  → nidalheim-api-auth:3001
+api-game.nidalheim.com  → nidalheim-api-game:3002
+```
+
+Le bloc `api-game` active `proxy_http_version 1.1` + `Upgrade/Connection` pour le WebSocket, et `proxy_read_timeout 86400s` pour tenir les connexions voice de longue durée.
+
+Le TLS/HTTPS n'est **pas géré par ce Nginx** — c'est délégué à la couche au-dessus (Cloudflare, Let's Encrypt upstream, etc.).
+
+## Données partagées
+
+### PostgreSQL
+
+Une seule base `nidalheim`, accédée par :
+- `api-auth` → tables `users`, `player_profiles`
+- `api-game` → table `chat_messages` (à créer, cf [Services / Database](/docs/services/database))
+- `db-migrate` → gère le schéma
+
+### Redis
+
+Utilisé uniquement par `api-auth` pour le stockage des **refresh tokens** avec TTL de 7 jours. Keys format : `refresh:<userId>:<tokenId>`.
+
+## Séparation auth
+
+Deux niveaux d'auth indépendants :
+
+1. **`api-auth` ↔ UE5 / `web/site`** : JWT HS256, signé par `api-auth`, vérifié par `api-game`
+2. **`web/docs` ↔ utilisateur** : NextAuth credentials provider qui fait lui-même un `POST /login` sur `api-auth`, puis gate `role === "admin"`
+
+La clé `JWT_SECRET` est partagée entre `api-auth` et `api-game` via `infra/.env`. `web/docs` n'en a pas besoin (il parle à `api-auth` en HTTP directement).
+
+## Décisions architecturales
+
+| Décision | Pourquoi |
+|----------|----------|
+| JWT **HS256** (vs RS256) | 2 services contrôlés en interne → la symétrique est suffisante et simplifie l'opérationnel (pas de PEM à gérer) |
+| Monorepo **non-workspace** | Chaque service a sa propre lifecycle ; pas de besoin de sharing de code cross-service |
+| **Drizzle** (vs Prisma) | Plus léger, génération SQL explicite, type-safe sans codegen runtime |
+| **Groq** (vs OpenAI) pour le LLM | Llama 70B à 10x la vitesse d'OpenAI, coût < 0.1$/M tokens |
+| **Cartesia** (vs ElevenLabs) TTS par défaut | Latency first-chunk < 400ms, connexion WS persistante → pas de handshake par tour |
+| **Registry-based deploy** (vs build-on-VPS) | Build parallèle sur GH runners, rollback par SHA, pas de charge CPU pendant le deploy |

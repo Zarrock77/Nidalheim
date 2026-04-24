@@ -1,0 +1,196 @@
+---
+title: Authentification
+---
+
+# Authentification
+
+L'auth Nidalheim repose sur **JWT HS256** avec un secret partagé entre `api-auth` (émet) et `api-game` (vérifie). Les refresh tokens sont stockés en Redis avec rotation.
+
+## Vue d'ensemble
+
+```
+┌─────────┐  POST /register  ┌──────────┐
+│ Client  │ ───────────────▶ │ api-auth │
+│ (UE5,   │ ◀─ JWTs ──────── │          │─┐ bcrypt(pw) + INSERT users
+│  web)   │                  └──────────┘ │
+└─────────┘                               ▼
+    │                                ┌─────────┐
+    │ accessToken (15m)              │Postgres │
+    │                                └─────────┘
+    │                                    │
+    │                                    │ refreshToken stocké (7d TTL)
+    │                                    ▼
+    │                                ┌─────────┐
+    │                                │  Redis  │
+    │                                └─────────┘
+    │
+    │ WS ?token=<JWT>
+    ▼
+┌──────────┐
+│ api-game │─── verify(JWT, JWT_SECRET, HS256)
+└──────────┘
+```
+
+## JWT HS256
+
+| | |
+|---|---|
+| **Algorithme** | HS256 (HMAC + SHA-256) |
+| **Secret** | `JWT_SECRET` — 64 bytes aléatoires, **partagé** entre `api-auth` et `api-game` |
+| **Access token TTL** | 15 min (`JWT_ACCESS_TOKEN_EXPIRY`) |
+| **Refresh token TTL** | 7 jours (`JWT_REFRESH_TOKEN_EXPIRY`) |
+
+### Pourquoi HS256 et pas RS256 ?
+
+Historiquement le projet utilisait RS256 (asymétrique). Migration vers HS256 car :
+- On contrôle les deux services qui signent/vérifient → la distinction privée/publique n'apporte rien
+- Simplicité opérationnelle : une seule variable d'env, plus de PEM à distribuer
+- Pas de clients externes qui ont besoin d'un endpoint JWKS
+
+> Si un jour un service tiers doit vérifier des tokens Nidalheim sans pouvoir les forger, il faudra revenir à RS256 et restaurer le endpoint `/.well-known/jwks.json`.
+
+## Register
+
+```http
+POST /register
+Content-Type: application/json
+
+{ "username": "Zarrock", "email": "x@y.com", "password": "hunter2hunter2" }
+```
+
+→ `201 Created` :
+```json
+{ "accessToken": "eyJ...", "refreshToken": "eyJ..." }
+```
+
+**Côté serveur** :
+1. Validation : `username`, `email`, `password` (min 8 chars)
+2. Check unicité username + email
+3. `bcrypt.hash(password, 12)`
+4. `INSERT INTO users (...)` + `INSERT INTO player_profiles (user_id)`
+5. `signAccessToken + signRefreshToken + storeRefreshToken(redis)`
+
+## Login
+
+Identifiant accepté : **username OU email** (historiquement le champ s'appelle `username`, mais la requête fait `WHERE username = $1 OR email = $1`).
+
+```http
+POST /login
+Content-Type: application/json
+
+{ "username": "Zarrock", "password": "..." }
+```
+
+→ `200 OK` :
+```json
+{
+  "user": { "id": "...", "username": "Zarrock", "email": "...", "role": "player" },
+  "accessToken": "eyJ...",
+  "refreshToken": "eyJ..."
+}
+```
+
+En échec (credentials invalides ou user inexistant) : `401 Unauthorized`.
+
+## Refresh avec rotation
+
+Le pattern : chaque refresh **révoque** l'ancien refresh token et en émet un nouveau.
+
+```http
+POST /refresh
+Content-Type: application/json
+
+{ "refreshToken": "eyJ..." }
+```
+
+→ `200 OK` :
+```json
+{ "accessToken": "...", "refreshToken": "..." }
+```
+
+**Côté serveur** :
+1. `jwt.verify(refreshToken, JWT_SECRET, HS256)` — valide signature + exp
+2. Check en Redis que `refresh:<userId>:<tokenId>` existe (non révoqué)
+3. **Delete** la clé Redis (révoque l'ancien)
+4. Émet un nouveau couple access + refresh
+5. Store le nouveau `tokenId` en Redis (TTL 7 jours)
+
+Un refresh token utilisé deux fois → le second appel trouve la clé Redis absente → `401`. Protection contre le rejeu.
+
+## Logout
+
+```http
+POST /logout
+Content-Type: application/json
+
+{ "refreshToken": "eyJ..." }
+```
+
+→ `200 OK` (idempotent, renvoie succès même si le token est invalide ou déjà révoqué).
+
+**Côté serveur** : decode le JWT (best-effort), delete la clé Redis. Pas de SQL, pas de side-effect au-delà.
+
+## Stockage des tokens côté client
+
+### UE5
+
+- `NidalheimAuthStorage.cpp` gère le `accessToken` + `refreshToken` en mémoire/disk
+- À chaque call API, injecte l'access token
+- Si `401` → appelle `/refresh` → retry
+- À la déco : `/logout` + purge du storage
+
+### Web (`web/docs` NextAuth)
+
+NextAuth gère le cookie de session httpOnly. L'access token est **stocké côté serveur** dans le JWT NextAuth, pas accessible en JavaScript côté client.
+
+```ts
+// web/docs/src/lib/auth.ts
+async jwt({ token, user }) {
+  if (user) {
+    token.accessToken = user.accessToken;
+    token.refreshToken = user.refreshToken;
+    token.role = user.role;
+  }
+  return token;
+}
+```
+
+## Gate admin pour `web/docs`
+
+Callback `authorized` refuse les users non-admin :
+
+```ts
+authorized({ auth, request }) {
+  if (!auth?.user) return false;
+  if (auth.user.role !== "admin") {
+    return NextResponse.redirect(new URL("/login?error=forbidden", request.nextUrl));
+  }
+  return true;
+}
+```
+
+Pour te passer admin après register :
+```sql
+UPDATE users SET role = 'admin' WHERE username = 'ton_username';
+```
+
+## CORS (api-auth)
+
+Contrôlé via `CORS_ORIGINS` (CSV).
+
+```bash
+CORS_ORIGINS=https://www.nidalheim.com,https://docs.nidalheim.com,http://localhost:3000
+```
+
+Default : `https://www.nidalheim.com,http://localhost:3000`.
+
+## Checklist sécurité
+
+- ✅ bcrypt 12 rounds (temps de hash ~200ms, cost de brute force élevé)
+- ✅ JWT secret 64 bytes aléatoires
+- ✅ Refresh rotation + révocation stricte
+- ✅ Idempotent logout (pas de leak de validité de token)
+- ✅ CORS whitelist
+- ⚠️ Pas de rate-limiting sur `/login` — à ajouter (risque brute-force)
+- ⚠️ Pas d'email verification — à envisager pour la prod grand public
+- ⚠️ Pas de 2FA — pas dans scope immédiat

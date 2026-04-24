@@ -1,0 +1,182 @@
+---
+title: Déploiement
+---
+
+# Déploiement
+
+Pipeline CI/CD **registry-based** via GitHub Actions et GitHub Container Registry (GHCR).
+
+Push sur `main` → build parallèle de 5 images Docker → push sur GHCR → SSH VPS → `docker compose pull && up -d`.
+
+## Workflow en 2 jobs
+
+```
+push main
+    │
+    ▼
+┌─────────────────────────────────────────────┐
+│ Job 1 — build (matrix × 5 services)         │
+│  - checkout                                  │
+│  - setup-buildx                              │
+│  - login GHCR (GITHUB_TOKEN)                 │
+│  - docker build + push                       │
+│    → ghcr.io/.../nidalheim-<svc>:<sha>       │
+│    → ghcr.io/.../nidalheim-<svc>:latest      │
+│  - cache type=gha                            │
+└─────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────┐
+│ Job 2 — deploy                               │
+│  - SSH vers VPS                              │
+│  - git pull (pour docker-compose + nginx)    │
+│  - heredoc infra/.env depuis GH Secrets      │
+│  - docker login ghcr.io (GHCR_PULL_TOKEN)    │
+│  - docker compose pull                       │
+│  - docker compose up -d --remove-orphans     │
+│  - docker compose run --rm db-migrate        │
+│  - docker image prune -f                     │
+└─────────────────────────────────────────────┘
+```
+
+## Services buildés
+
+| Service | Context Docker | Image |
+|---------|---------------|-------|
+| site | `./web/site` | `ghcr.io/epitechpromo2027/nidalheim-site` |
+| docs | `./web/docs` | `ghcr.io/epitechpromo2027/nidalheim-docs` |
+| api-auth | `./services/api-auth` | `ghcr.io/epitechpromo2027/nidalheim-api-auth` |
+| api-game | `./services/api-game` | `ghcr.io/epitechpromo2027/nidalheim-api-game` |
+| db-migrate | `./services/db` | `ghcr.io/epitechpromo2027/nidalheim-db-migrate` |
+
+Chaque image est taguée **deux fois** :
+- `:latest` — mutable, remplacé à chaque push sur main
+- `:<full-sha>` — immuable, permet le rollback
+
+## Rollback
+
+Sur le VPS :
+```bash
+cd ~/Nidalheim/infra
+IMAGE_TAG=<sha-antérieur> docker compose up -d
+```
+
+Le `docker-compose.yml` utilise `image: ghcr.io/.../nidalheim-<svc>:${IMAGE_TAG:-latest}` — il suffit d'exporter `IMAGE_TAG` pour pin une version précédente.
+
+## Secrets GitHub
+
+### Accès VPS
+- `VPS_HOST` — hostname du VPS
+- `VPS_USER` — user SSH
+- `VPS_SSH_KEY` — clé privée SSH (format PEM)
+
+### Registry
+- `GHCR_PULL_TOKEN` — Personal Access Token classique, scope `read:packages` uniquement.
+  **Inutile si le repo est public.**
+
+### Secrets applicatifs (écrits dans `infra/.env` sur le VPS)
+- `OPENAI_API_KEY`
+- `DEEPGRAM_API_KEY`
+- `LLM_API_KEY` (Groq)
+- `CARTESIA_API_KEY`, `CARTESIA_VOICE_ID`
+- `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` (peuvent être vides)
+- `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`
+- `AUTH_SECRET` (NextAuth)
+- `JWT_SECRET` (HS256 partagé api-auth ↔ api-game)
+
+Valeurs hardcodées dans le workflow (pas de secret nécessaire) :
+- `LLM_BASE_URL=https://api.groq.com/openai/v1`
+- `LLM_MODEL=llama-3.1-8b-instant`
+- `TTS_PROVIDER=cartesia`
+
+## Setup VPS — une seule fois
+
+```bash
+# 1. Cloner le repo dans ~/Nidalheim
+ssh vps
+cd ~
+git clone git@github.com:EpitechPromo2027/G-EIP-600-PAR-6-1-eip-merwan.korkmaz.git Nidalheim
+
+# 2. Install Docker + docker compose plugin (classique)
+
+# 3. Aucun besoin de générer des clés JWT (HS256 n'en utilise plus)
+
+# 4. Premier run — le workflow s'occupera du reste
+```
+
+Le workflow écrit automatiquement `infra/.env` à chaque deploy → pas besoin de le créer à la main.
+
+## `docker-compose.yml` — clé du setup
+
+Chaque service a **à la fois** `image:` et `build:` :
+
+```yaml
+nidalheim-site:
+  image: ghcr.io/epitechpromo2027/nidalheim-site:${IMAGE_TAG:-latest}
+  build:
+    context: ../web/site
+    dockerfile: Dockerfile
+```
+
+Comportement :
+- `docker compose up` → pull l'image (priorité à `image:`)
+- `docker compose build` → force un build local (via `build:`)
+- `docker compose pull` → pull uniquement, sans démarrer
+
+C'est la combinaison qui permet au workflow registry-based de fonctionner tout en gardant la possibilité de build localement en dev.
+
+## Migrations DB
+
+Lancées **après** `docker compose up -d` :
+
+```bash
+docker compose run --rm db-migrate
+```
+
+Le container `db-migrate` exécute `tsx src/migrate.ts` puis exit. Il ne fait pas partie du `up -d` (il n'a pas vocation à tourner en permanence).
+
+Si une migration échoue, le workflow continue malgré tout → les services tournent avec un schéma potentiellement incohérent. **À hardener** avec un `|| exit 1` explicite.
+
+## Reverse proxy Nginx
+
+Tous les services Docker tournent en réseau interne (`nidalheim-network`). **Seul nginx** est exposé sur `:80` à l'hôte.
+
+Nginx route vers les 4 sous-domaines (voir [Architecture](/docs/architecture#reverse-proxy-nginx)).
+
+**Pas de HTTPS au niveau Nginx** — délégué à la couche au-dessus (Cloudflare, par exemple).
+
+## Limites et améliorations futures
+
+### Actuelles
+
+- ❌ Pas de lint / test / typecheck avant le deploy → un commit qui ne build pas casse la prod
+- ❌ Pas de healthcheck post-deploy → un container qui crash-loop n'est pas détecté par la CI
+- ❌ Migration fail silencieusement (cf. ci-dessus)
+- ❌ GHCR 500 MB free tier en privé → limite vite atteinte si on tag trop
+
+### Améliorations identifiées
+
+1. **Job `check` avant `build`** : lint + typecheck + build local de chaque service. Bloque le deploy si le code ne compile pas.
+2. **Job `verify` après `deploy`** : curl sur les 4 domaines, fail si code ≠ 200.
+3. **Retention policy GHCR** : ne garder que les N derniers tags immutables (+ `:latest`), prune le reste automatiquement.
+4. **Repo public** → GHCR illimité et GH Actions minutes illimitées.
+5. **Backups Postgres** via `pg_dump` + stockage objet externe.
+
+## Déploiement manuel
+
+Si tu veux re-trigger le workflow sans push :
+```bash
+gh workflow run deploy.yml
+```
+
+Ou directement sur le VPS sans passer par GH Actions :
+```bash
+ssh vps
+cd ~/Nidalheim
+git pull
+cd infra
+# Assurer que infra/.env est à jour
+docker compose pull
+docker compose up -d
+docker compose run --rm db-migrate
+```

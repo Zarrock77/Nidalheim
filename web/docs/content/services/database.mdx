@@ -1,0 +1,115 @@
+---
+title: Base de données
+---
+
+# Base de données
+
+PostgreSQL 16 géré via [Drizzle ORM](https://orm.drizzle.team/). Tout le schéma et les migrations vivent dans `services/db`.
+
+## Schémas Postgres
+
+Deux schémas coexistent dans la DB `nidalheim` :
+
+| Schéma | Contenu | Géré par |
+|--------|---------|----------|
+| `public` | Tables applicatives (users, player_profiles, chat_messages) | Drizzle (migrations) |
+| `drizzle` | Table `__drizzle_migrations` (state des migrations) | Drizzle (auto) |
+
+Tu peux ignorer `drizzle` — c'est de la plomberie.
+
+## Tables
+
+### `users`
+
+| Colonne | Type | Notes |
+|---------|------|-------|
+| `id` | `uuid` PK | Auto `gen_random_uuid()` |
+| `username` | `varchar(50)` UNIQUE NOT NULL | |
+| `email` | `varchar(255)` UNIQUE NOT NULL | |
+| `password_hash` | `text` NOT NULL | bcrypt 12 rounds |
+| `role` | `varchar(20)` NOT NULL | Default `player` ; `admin` pour accéder à `web/docs` |
+| `created_at` | `timestamp` NOT NULL | Default `now()` |
+
+### `player_profiles`
+
+| Colonne | Type | Notes |
+|---------|------|-------|
+| `user_id` | `uuid` PK | FK → `users.id` ON DELETE CASCADE |
+| `xp` | `integer` | Default 0 |
+| `level` | `integer` | Default 1 |
+| `faction` | `varchar(50)` | Nullable |
+| `reputation` | `jsonb` | Default `{}` |
+| `quests_done` | `jsonb` | Default `[]` |
+| `updated_at` | `timestamp` | Default `now()` |
+
+Une ligne est créée automatiquement par `api-auth` lors du register.
+
+### `chat_messages`
+
+Historique des dialogues PNJ, alimenté par `api-game/conversationStore.js` pour les deux endpoints `/text` et `/audio`.
+
+| Colonne | Type | Notes |
+|---------|------|-------|
+| `id` | `uuid` PK | Auto `gen_random_uuid()` |
+| `user_id` | `uuid` NOT NULL | FK → `users.id` ON DELETE CASCADE |
+| `role` | `varchar(20)` NOT NULL | `user` ou `assistant` |
+| `content` | `text` NOT NULL | Le message brut |
+| `channel` | `varchar(20)` | `text` ou `audio` (source du tour) |
+| `created_at` | `timestamp` NOT NULL | Default `now()` |
+
+Index composite `idx_chat_messages_user_created` sur `(user_id, created_at)` pour servir le `ORDER BY created_at DESC LIMIT 20` de `ConversationStore.loadRecent`.
+
+Insertion des paires user+assistant en transaction (`appendTurn`) pour éviter un état désynchronisé si le process crash entre les deux inserts.
+
+## Commandes
+
+```bash
+cd services/db
+
+pnpm generate    # scanner src/schema/ et créer migrations/00XX_*.sql
+pnpm migrate     # appliquer toutes les migrations pending
+pnpm studio      # UI Drizzle Studio (http://local.drizzle.studio)
+pnpm push        # sync direct schéma ↔ DB sans migration — DEV ONLY
+```
+
+### Workflow d'ajout de table / colonne
+
+1. Modifier un fichier dans `src/schema/`
+2. `pnpm generate` → Drizzle génère `migrations/00XX_name.sql`
+3. **Relire le SQL généré** (Drizzle peut proposer des `DROP`s involontaires)
+4. `pnpm migrate` en local pour tester
+5. Commit les fichiers `src/schema/*` **et** `migrations/*`
+6. Push → CI exécutera `docker compose run --rm db-migrate` en prod
+
+## Connexion
+
+- **Locale** : `postgresql://nidalheim:<password>@localhost:5432/nidalheim`
+- **Prod (depuis le VPS)** : idem, mais via le service Docker (`@postgres:5432`)
+
+Les services construisent l'URL depuis `POSTGRES_USER/PASSWORD/DB` via le compose :
+```yaml
+DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+```
+
+## Config Drizzle
+
+`drizzle.config.ts` lit `../../infra/.env` directement pour fonctionner en dev sans Docker :
+
+```ts
+config({ path: '../../infra/.env' });
+
+export default defineConfig({
+  schema: './src/schema/index.ts',
+  out: './migrations',
+  dialect: 'postgresql',
+  dbCredentials: {
+    url: `postgresql://${user}:${password}@${host}:${port}/${db}`,
+  },
+});
+```
+
+## Sauvegardes
+
+Pas de backup automatisé actuellement. À mettre en place :
+- `pg_dump` via cron → bucket S3/Scaleway Object Storage
+- ou un outil comme [pgbackrest](https://pgbackrest.org/) pour les setups plus sérieux

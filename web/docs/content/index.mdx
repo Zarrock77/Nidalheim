@@ -1,7 +1,35 @@
-# Nidalheim — Documentation
+---
+title: Documentation Nidalheim
+---
 
-Bienvenue sur la documentation interne de Nidalheim.
+# Nidalheim — Documentation interne
 
-## Sections
+Bienvenue sur la documentation backend de **Nidalheim**, le jeu UE5 dark fantasy nordique.
+Cette doc est réservée aux développeurs et admins du projet.
 
-- [Setup du projet](/docs/setup-project) — prérequis et installation locale
+## Que trouver ici
+
+- **[Installation locale](/docs/setup-project)** — prérequis, clone, env, migrations, lancement des services.
+- **[Architecture](/docs/architecture)** — vue d'ensemble du monorepo, des services et des flux de données.
+- **[Services](/docs/services)** — détail par service : routes REST, endpoints WebSocket, schéma DB.
+- **[Authentification](/docs/auth)** — flow complet JWT HS256 (register, login, refresh, logout).
+- **[Voice pipeline](/docs/voice-pipeline)** — Deepgram STT → Groq LLM → Cartesia TTS en streaming.
+- **[Déploiement](/docs/deploy)** — CI/CD registry-based, GHCR, VPS.
+- **[Conventions](/docs/conventions)** — style de code, commits, arborescence.
+
+## Stack en un coup d'œil
+
+| Couche | Stack |
+|--------|-------|
+| Backend | Node.js 22, Express 5, WebSocket (`ws`) |
+| Frontend | Next.js 16, React 19, Tailwind 4, Nextra 4 |
+| DB | PostgreSQL 16 (Drizzle ORM), Redis 7 |
+| IA | Groq (Llama 3.x), Deepgram, Cartesia, ElevenLabs |
+| Infra | Docker Compose, Nginx, GitHub Actions, GHCR |
+
+## Statut actuel
+
+- ✅ Auth JWT HS256 fonctionnelle (register, login, refresh, logout)
+- ✅ Text chat `/text` avec historique NPC persistant
+- ✅ Voice chat `/audio` streaming (STT → LLM → TTS < 1s latency)
+- ✅ CI/CD registry-based (GHCR) avec rollback par SHA

@@ -1,61 +1,149 @@
-# Setup du projet
+---
+title: Installation locale
+---
+
+# Installation locale
+
+Guide pas à pas pour lancer l'ensemble du backend Nidalheim sur ta machine.
 
 ## Prérequis
 
-- Node.js 20+
-- pnpm 10+ (pour `web/*`, `services/api-game`, `services/db`)
-- npm (pour `services/api-auth`)
-- Docker + Docker Compose
+- **Node.js 22+**
+- **pnpm 10+** (pour `web/*`, `services/api-game`, `services/db`)
+- **npm** (pour `services/api-auth`)
+- **Docker Desktop** (Postgres + Redis + nginx + tous les services en prod)
+- Un compte sur les providers IA : [Groq](https://console.groq.com), [Deepgram](https://deepgram.com), [Cartesia](https://cartesia.ai), optionnellement [ElevenLabs](https://elevenlabs.io)
 
-## Premier run
+## 1 — Cloner + configurer
 
 ```bash
-# 1. Variables d'env
+git clone git@github.com:EpitechPromo2027/G-EIP-600-PAR-6-1-eip-merwan.korkmaz.git
+cd G-EIP-600-PAR-6-1-eip-merwan.korkmaz
+
 cp infra/.env.example infra/.env
-# puis renseigner OPENAI_API_KEY, POSTGRES_*, AUTH_SECRET, clés voice, etc.
+```
 
-# 2. Infra locale (Postgres + Redis)
-cd infra && docker compose up -d postgres redis
+Remplir `infra/.env` :
 
-# 3. Clés JWT pour api-auth
-cd services/api-auth
-npm install
-npm run generate-keys
+```bash
+# Postgres
+POSTGRES_USER=nidalheim
+POSTGRES_PASSWORD=<mot-de-passe-fort>
+POSTGRES_DB=nidalheim
 
-# 4. Migrations DB
+# Auth
+AUTH_SECRET=$(openssl rand -base64 64)  # NextAuth (docs)
+JWT_SECRET=$(openssl rand -base64 64)   # HS256 partagé api-auth ↔ api-game
+
+# IA
+OPENAI_API_KEY=sk-...       # fallback, rarement utilisé en pratique
+DEEPGRAM_API_KEY=...        # voice STT
+LLM_API_KEY=gsk_...         # clé Groq (text + voice LLM)
+TTS_PROVIDER=cartesia
+CARTESIA_API_KEY=sk_car_...
+CARTESIA_VOICE_ID=...       # voix française recommandée
+```
+
+## 2 — Lancer Postgres + Redis
+
+```bash
+cd infra
+docker compose up -d postgres redis
+```
+
+Vérifier que Postgres accepte les connexions :
+```bash
+docker compose exec postgres pg_isready -U nidalheim
+```
+
+## 3 — Migrations DB
+
+```bash
 cd services/db
 pnpm install
 pnpm migrate
-
-# 5. Installer les deps restantes
-cd services/api-game && pnpm install
-cd web/docs && pnpm install
-cd web/site && pnpm install
 ```
 
-## Lancer les services (chacun dans son terminal)
+Crée les tables `users`, `player_profiles` et `chat_messages`. Drizzle crée aussi un schéma `drizzle` avec sa propre table `__drizzle_migrations` pour tracker les migrations déjà appliquées.
+
+## 4 — Clés JWT
+
+Plus de PEM RS256 à gérer — depuis la migration HS256, il suffit d'un `JWT_SECRET` aléatoire dans `infra/.env` (fait à l'étape 1).
+
+## 5 — Installer les deps de chaque service
 
 ```bash
-# API REST auth
-cd services/api-auth && npm run dev      # :3001
+# api-auth utilise npm
+cd services/api-auth && npm install
 
-# API WebSocket game
-cd services/api-game && pnpm start       # :3002
-
-# Site vitrine (register/login)
-cd web/site && pnpm dev                  # :3000
-
-# Docs (ce que tu es en train de lire)
-cd web/docs && pnpm dev                  # :3000
+# les autres utilisent pnpm
+cd services/api-game && pnpm install
+cd web/site          && pnpm install
+cd web/docs          && pnpm install
 ```
 
-## Accès admin aux docs
+## 6 — Lancer les services
 
-Le middleware de `web/docs` exige `role === "admin"`. Après register sur le site,
-promouvoir ton user :
+Chacun dans son propre terminal :
 
-```sql
-UPDATE users SET role = 'admin' WHERE username = 'ton_username';
+```bash
+# API REST Auth (:3001)
+cd services/api-auth && npm run dev
+
+# API WebSocket Game (:3002)
+cd services/api-game && pnpm start
+
+# Site vitrine (:3000)
+cd web/site && pnpm dev
+
+# Docs internes (port libre)
+cd web/docs && pnpm dev --port 3004
 ```
 
-Via Drizzle Studio : `cd services/db && pnpm studio`.
+## 7 — Créer ton compte + devenir admin
+
+1. Ouvre http://localhost:3000/register et crée un compte
+2. Passe ton user en `admin` pour accéder aux docs :
+
+```bash
+docker compose -f infra/docker-compose.yml exec postgres psql -U nidalheim -d nidalheim \
+  -c "UPDATE users SET role='admin' WHERE email='ton@email.com';"
+```
+
+Ou via **Drizzle Studio** :
+```bash
+cd services/db && pnpm studio
+```
+
+3. Login sur http://localhost:3004/login (ou le port où tourne `web/docs`)
+
+## Structure des ports
+
+| Port | Service |
+|------|---------|
+| 3000 | `web/site` (Next.js dev) |
+| 3001 | `api-auth` |
+| 3002 | `api-game` (WebSocket) |
+| 3004 | `web/docs` (Next.js dev, port custom) |
+| 5432 | Postgres |
+| 6379 | Redis |
+
+## Dépannage
+
+**api-auth crash avec "JWT_SECRET is required"**
+Vérifier que `JWT_SECRET` est bien présent dans `infra/.env` et que l'import de `loadEnv.ts` se fait **avant** les autres imports dans `src/index.ts`.
+
+**Postgres refuse la connexion**
+Recréer le volume :
+```bash
+cd infra
+docker compose down -v
+docker compose up -d postgres redis
+cd ../services/db && pnpm migrate
+```
+
+**CORS error sur le register**
+Ajouter ton port frontend à `CORS_ORIGINS` dans `infra/.env`, puis redémarrer `api-auth`. Exemple :
+```
+CORS_ORIGINS=http://localhost:3000,http://localhost:3003
+```

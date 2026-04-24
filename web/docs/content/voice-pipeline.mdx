@@ -1,0 +1,153 @@
+---
+title: Voice pipeline
+---
+
+# Voice pipeline
+
+Le endpoint `/audio` de `api-game` orchestre un pipeline streaming **STT → LLM → TTS** bout-en-bout pour des dialogues PNJ vocaux temps-réel.
+
+**Objectif de latency** : first-audio-chunk client **< 1 seconde** après la fin de l'élocution utilisateur.
+
+## Providers par défaut
+
+| Stage | Provider | Modèle |
+|-------|----------|--------|
+| STT (speech-to-text) | **Deepgram** | Nova-3 streaming |
+| LLM | **Groq** (OpenAI-compat) | `llama-3.3-70b-versatile` |
+| TTS (text-to-speech) | **Cartesia** | `sonic-2`, voix française |
+
+Fallback TTS : **ElevenLabs** (activable via `TTS_PROVIDER=elevenlabs`).
+
+## Architecture de flux
+
+```
+┌────────────┐                                                  ┌────────────┐
+│  UE5 client│                                                  │  UE5 client│
+└─────┬──────┘                                                  └─────▲──────┘
+      │ PCM16LE @ 48kHz (base64)                                       │ PCM16LE TTS (base64)
+      │                                                                 │
+      ▼                                                                 │
+┌────────────┐     ┌────────────┐     ┌────────────┐     ┌────────────┐│
+│ Deepgram   │────▶│ LLMStream  │────▶│  Cartesia  │────▶│  AudioPipe │┘
+│  STT WS    │     │ (Groq WS)  │     │   TTS WS   │     │            │
+│            │     │            │     │ (persistent│     │            │
+└────────────┘     └────────────┘     │   per user)│     └────────────┘
+     ▲                                └────────────┘
+     │ client PCM                            ▲
+     │                                       │
+     │                                  ┌────┴─────┐
+     └─────audio_config (sample rate)──▶│ config   │
+                                        └──────────┘
+```
+
+## Protocole client ↔ server
+
+### Client → Server (WebSocket)
+
+| Type | Payload | Description |
+|------|---------|-------------|
+| JSON control | `{ type: "audio_config", sample_rate: 48000, device: "...", bluetooth_hfp: false }` | **Première frame obligatoire**. Permet à Deepgram d'être ouvert au bon sample rate. |
+| PCM base64 | `"<base64>"` (>100 bytes) | Chunk audio mono, 16-bit LE |
+| Control | `"COMMIT"` | Force la finalisation de l'utterance courante (push-to-talk release) |
+
+### Server → Client (JSON uniquement)
+
+| `type` | `data`/`message` | Description |
+|--------|------------------|-------------|
+| `user_transcript_partial` | `"bonj..."` | Transcript interim Deepgram (affichable en typing) |
+| `user_transcript` | `"bonjour"` | Transcript final |
+| `text` | `"<full NPC reply>"` | Réponse complète du LLM (après `onComplete`) |
+| `audio` | `"<base64-pcm>"` | Chunk audio TTS streaming |
+| `error` | `"stt: ...", "llm: ...", "tts: ..."` | Erreur d'un composant |
+
+## Déroulement d'un tour
+
+1. **Connexion WS** avec `?token=<JWT>` → auth HS256
+2. **`audio_config`** reçu → ouverture Deepgram au bon sample rate, démarrage TTS Cartesia en parallèle (warm-up)
+3. **Hydration** (parallèle, non-bloquant) : `ConversationStore.loadRecent(userId, 20)` → injecté dans le contexte LLM
+4. **Stream PCM** → Deepgram émet `onInterim` (partial) et `onFinal` (speech_final)
+5. **`COMMIT`** reçu (ou `speech_final` de Deepgram) → accumulation du transcript
+6. **`_flushUtterance`** : appelle `llm.streamResponse(userText)`
+   - Chaque delta token → `tts.sendText(delta)` → Cartesia émet du PCM en streaming
+   - `onComplete` → `tts.flush()` + persist du tour (user + assistant) en transaction Postgres
+7. L'utilisateur peut reparler → retour étape 4
+
+## Latency budget
+
+Sur une utterance courte ("salut") :
+
+| Step | Latency observée |
+|------|------------------|
+| STT final (Deepgram) | 100-200 ms après fin d'élocution |
+| LLM first token (Groq Llama 70B) | 150-300 ms |
+| TTS first chunk (Cartesia persistent) | 200-400 ms |
+| **Total** (fin élocution → first audio) | **~500-900 ms** |
+
+Le gain principal de Cartesia vs ElevenLabs : **connexion WS persistante** pour toute la session. Chaque NPC reply alloue juste un nouveau `context_id` sur le socket déjà ouvert → pas de handshake TLS + WS upgrade de 500-700 ms par tour.
+
+## Hot path — optimisations
+
+### 1. Pas d'ouverture Deepgram avant `audio_config`
+
+Le client envoie son `sample_rate` dans la première frame JSON. On attend cette info avant d'ouvrir Deepgram pour éviter un reconfigure au premier chunk audio (qui produit des transcripts vides sur les premiers 200ms).
+
+Pendant l'attente, les chunks PCM reçus sont mis en buffer (capped à ~1s d'audio @ 48kHz pour éviter l'OOM).
+
+### 2. Cartesia persistent WS
+
+Ouvert une fois dans `pipeline.start()`. Chaque tour :
+```js
+tts.beginUtterance();      // nouvelle context_id sur le WS existant
+tts.sendText(delta);       // streaming
+tts.flush();               // finalise la synthèse
+```
+
+### 3. Hydrate + TTS warmup en parallèle
+
+```js
+const hydrate = (async () => {
+  const history = await conversationStore.loadRecent(user.id);
+  if (history.length > 0) llm.setHistory(history);
+})();
+
+if (ttsRoute.persistent) {
+  await ttsRoute.instance.start();  // warm Cartesia
+}
+await hydrate;
+```
+
+Aucun des deux ne bloque le premier PTT.
+
+### 4. Audio config mid-session
+
+Si le user switche de micro (Bluetooth HFP ↔ micro intégré), le client renvoie un nouveau `audio_config` avec le nouveau sample rate. `AudioPipeline.onClientAudioConfig` détecte le changement et fait un `stt.reconfigure()` transparent — pas besoin de relancer l'éditeur UE5.
+
+## Gestion d'erreurs
+
+- **STT error** → `{ type: "error", message: "speech-to-text: ..." }`
+- **LLM error** → `{ type: "error", message: "llm: ..." }`
+- **TTS error** → `{ type: "error", message: "text-to-speech: ..." }`
+
+Les erreurs **ne coupent pas** la connexion — le pipeline peut retenter à l'utterance suivante.
+
+**Exception** : échec du `pipeline.start()` → `clientWs.close()` avec un message d'erreur JSON avant fermeture.
+
+## Historique conversationnel
+
+Le contexte LLM est hydraté avec les 20 derniers tours (table `chat_messages`, ordre chronologique). Les tours user+assistant sont insérés **en transaction** après chaque `onComplete` du LLM pour éviter un état desynchronisé en cas de crash.
+
+Le même historique est partagé avec l'endpoint `/text` — un utilisateur qui switch text ↔ voice retrouve son fil. Schéma de la table dans [Services / Database](/docs/services/database#chat_messages).
+
+## Debug
+
+`DEBUG_AUDIO_DUMP=1` → `/tmp/nidalheim-audio-<user>-<timestamp>.raw` contient le PCM16LE mono reçu du client. Relecture offline :
+
+```bash
+ffplay -f s16le -ar 48000 -ac 1 /tmp/nidalheim-audio-Zarrock-1714000000.raw
+```
+
+À ne **jamais** activer en prod (disk usage).
+
+## System prompt
+
+Le system prompt PNJ est dans `services/api-game/src/systemPrompt.js` — static, jamais stocké en DB (identique pour tous les users, change rarement, gérable via code review).

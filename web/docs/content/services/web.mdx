@@ -1,0 +1,151 @@
+---
+title: Frontends (site + docs)
+---
+
+# Frontends
+
+Deux apps Next.js 16 séparées, avec deux rôles distincts.
+
+## `web/site` — Site vitrine
+
+**Public-facing.** Register, login, marketing.
+
+### Stack
+
+- Next.js 16 (App Router, Turbopack en dev)
+- React 19
+- Tailwind CSS 4
+- Framer Motion pour les animations
+- MDX pour les patch notes
+
+### Routes
+
+- `/` — landing
+- `/register` — formulaire inscription → `api-auth POST /register`
+- `/login` — connexion → `api-auth POST /login`
+- `/patch-notes` — liste MDX
+
+### Appel `api-auth`
+
+```ts
+// web/site/src/lib/auth/api.ts
+const API_URL =
+  process.env.NEXT_PUBLIC_API_AUTH_URL || "https://api-auth.nidalheim.com";
+```
+
+`NEXT_PUBLIC_API_AUTH_URL` est **inliné au build** (variable `NEXT_PUBLIC_*`). Pour dev local :
+
+```bash
+# web/site/.env.local
+NEXT_PUBLIC_API_AUTH_URL=http://localhost:3001
+```
+
+> ⚠️ Le Dockerfile de prod **ne passe pas** cette variable au build → le fallback hardcodé (`https://api-auth.nidalheim.com`) est utilisé. OK tant que le domaine prod ne change pas.
+
+### Dev
+
+```bash
+cd web/site
+pnpm dev --port 3003   # :3000 peut être pris par web/docs
+```
+
+---
+
+## `web/docs` — Documentation interne
+
+**Admin-only.** Nextra 4.6 avec catch-all route App Router.
+
+### Stack
+
+- Next.js 16 + Nextra 4.6 + `nextra-theme-docs`
+- NextAuth 5 (credentials provider → `api-auth`)
+- Tailwind 4 (pour les pages hors Nextra)
+- Pagefind pour la search (build uniquement)
+
+### Auth
+
+NextAuth avec credentials provider qui parle à `api-auth` :
+
+```ts
+// web/docs/src/lib/auth.ts
+Credentials({
+  async authorize(credentials) {
+    const res = await fetch(`${AUTH_API_URL}/login`, {
+      method: "POST",
+      body: JSON.stringify({
+        username: credentials.email,  // api-auth accepte email OR username
+        password: credentials.password,
+      }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return { id: data.user.id, name: data.user.username, email: data.user.email, role: data.user.role, ... };
+  },
+}),
+```
+
+Callback `authorized` dans `auth.ts` fait le gate :
+
+```ts
+authorized({ auth, request }) {
+  if (!auth?.user) return false;
+  if (auth.user.role !== "admin") {
+    return NextResponse.redirect(new URL("/login?error=forbidden", request.nextUrl));
+  }
+  return true;
+}
+```
+
+Référencé depuis `src/proxy.ts` (renommage Next 16 de `middleware.ts`) :
+
+```ts
+export { auth as proxy } from "@/lib/auth";
+
+export const config = {
+  matcher: [
+    "/((?!api/auth|login|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+  ],
+};
+```
+
+### Nextra — setup
+
+- **Config** : `next.config.ts` avec `nextra({ search: false, contentDirBasePath: "/docs" })`
+- **Content** : répertoire `content/` à la racine du package
+- **Catch-all route** : `src/app/docs/[[...mdxPath]]/page.tsx` utilise `importPage` de `nextra/pages` pour rendre le MDX du répertoire `content/`
+- **Layout Nextra** : `src/app/docs/layout.tsx` (navbar, sidebar, footer, search)
+
+### Recherche
+
+Désactivée en dev (`search={null}` dans le `<Layout>`). La recherche Nextra 4 utilise **pagefind**, qui nécessite un build : `postbuild` script dans `package.json:10` lance `pagefind --site .next/server/app`.
+
+Pour activer en prod :
+1. Retirer `search={null}` dans `src/app/docs/layout.tsx`
+2. Remettre `search: true` (ou retirer la ligne) dans `next.config.ts`
+3. `pnpm build && pnpm start` — le postbuild générera `public/_pagefind/`
+
+### Structure du contenu MDX
+
+```
+web/docs/content/
+├── _meta.ts                  # ordre de nav au niveau racine
+├── index.mdx                 → /docs
+├── setup-project.mdx         → /docs/setup-project
+├── architecture.mdx          → /docs/architecture
+├── services/
+│   ├── _meta.ts              # ordre de nav du sous-dossier
+│   ├── api-auth.mdx          → /docs/services/api-auth
+│   ├── api-game.mdx          → /docs/services/api-game
+│   └── database.mdx          → /docs/services/database
+├── auth.mdx                  → /docs/auth
+├── voice-pipeline.mdx        → /docs/voice-pipeline
+├── deploy.mdx                → /docs/deploy
+└── conventions.mdx           → /docs/conventions
+```
+
+### Dev
+
+```bash
+cd web/docs
+pnpm dev --port 3004   # :3000 est probablement pris par web/site
+```

@@ -2,18 +2,18 @@
 
 ## Projet
 
-Nidalheim — monorepo backend pour un jeu UE5 (dark fantasy nordique). Auth JWT, API WebSocket avec PNJ IA (OpenAI), site vitrine Next.js, docs Nextra.
+Nidalheim — monorepo backend pour un jeu UE5 (dark fantasy nordique). Auth JWT HS256, API WebSocket temps-réel avec PNJ IA (text + voice), site vitrine Next.js, docs Nextra admin-only.
 
 ## Structure
 
 ```
-services/api-auth/   # API REST auth (Express 5, JWT RS256, bcrypt, Redis, PostgreSQL)
-services/api-game/   # API WebSocket temps-reel (ws, OpenAI, JavaScript)
+services/api-auth/   # API REST auth (Express 5, JWT HS256, bcrypt, Redis, PostgreSQL)
+services/api-game/   # API WebSocket temps-réel (ws, Groq LLM, Deepgram STT, Cartesia TTS)
 services/db/         # Schema + migrations PostgreSQL (Drizzle ORM)
-services/p4d/        # Serveur Perforce (assets UE5)
-web/site/            # Site vitrine (Next.js 16, React 19, Tailwind 4)
-web/docs/            # Documentation (Nextra 4.6, pagefind)
-infra/               # Docker Compose, Nginx, .env
+services/p4d/        # Serveur Perforce (assets UE5) — géré séparément
+web/site/            # Site vitrine + register/login (Next.js 16, React 19, Tailwind 4)
+web/docs/            # Documentation interne (Nextra 4, admin-only)
+infra/               # Docker Compose, Nginx reverse proxy, .env
 ```
 
 ## Commandes
@@ -29,13 +29,14 @@ cd services/db && pnpm migrate
 cd services/api-auth && npm run dev     # :3001
 cd services/api-game && pnpm start      # :3002
 cd web/site && pnpm dev                 # :3000
-cd web/docs && pnpm dev                 # :3000
+cd web/docs && pnpm dev --port 3004     # :3000 conflict avec site, utiliser un autre port
 
 # DB
 cd services/db
-pnpm generate    # generer migration apres modif schema
+pnpm generate    # générer migration après modif schema
 pnpm migrate     # appliquer migrations
 pnpm studio      # interface Drizzle Studio
+pnpm push        # sync direct (dev uniquement, bypass migrations)
 
 # Lint (web uniquement)
 cd web/site && pnpm lint
@@ -44,6 +45,7 @@ cd web/docs && pnpm lint
 # Build
 cd services/api-auth && npm run build
 cd web/site && pnpm build
+cd web/docs && pnpm build   # génère aussi l'index pagefind via postbuild
 ```
 
 ## Conventions de code
@@ -51,10 +53,10 @@ cd web/site && pnpm build
 - **Quotes** : double quotes (`"`)
 - **Semicolons** : oui, toujours
 - **Indentation** : 2 espaces
-- **TypeScript strict** : active partout
+- **TypeScript strict** : activé partout sauf `services/api-game` (JavaScript ESM pur)
 - **Imports backend** : relatifs avec extension `.js` (`import foo from './routes/register.js'`)
 - **Imports frontend** : alias `@/` vers `src/` (`import { X } from "@/components/X"`)
-- **Composants React** : PascalCase, server components par defaut, `"use client"` si necessaire
+- **Composants React** : PascalCase, server components par défaut, `"use client"` si nécessaire
 - **Variables/fonctions** : camelCase
 - **Fichiers schema DB** : kebab-case (`player-profiles.ts`)
 
@@ -63,7 +65,7 @@ cd web/site && pnpm build
 - **pnpm** : `web/site`, `web/docs`, `services/api-game`, `services/db`
 - **npm** : `services/api-auth`
 
-Pas de workspace racine. Chaque service gere ses deps independamment.
+Pas de workspace racine. Chaque service gère ses deps indépendamment.
 
 ## Git
 
@@ -73,60 +75,108 @@ Pas de workspace racine. Chaque service gere ses deps independamment.
 
 ## Variables d'environnement
 
-Toutes chargees via `dotenv`. Fichier principal : `infra/.env` (copie de `infra/.env.example`).
+Source de vérité : `infra/.env` (copié depuis `infra/.env.example`, gitignored). Les services `api-auth`, `api-game` et `db` chargent ce fichier via `config({ path: "../../infra/.env" })`.
 
-| Variable | Usage |
-|----------|-------|
-| `POSTGRES_USER` / `PASSWORD` / `DB` | PostgreSQL |
-| `OPENAI_API_KEY` | PNJ IA (api-game) |
-| `NIDALHEIM_API_KEY` | Auth clients WebSocket |
-| `NEXT_PUBLIC_SUPABASE_URL` / `ANON_KEY` | Supabase (site, docs) |
+| Variable | Utilisateur | Description |
+|----------|-------------|-------------|
+| `POSTGRES_USER` / `PASSWORD` / `DB` | postgres, services | Credentials DB |
+| `DATABASE_URL` | api-auth, api-game, db-migrate | Connexion Postgres (construit depuis `POSTGRES_*` dans le compose) |
+| `REDIS_URL` | api-auth | Connexion Redis (default `redis://localhost:6379`) |
+| `JWT_SECRET` | api-auth, api-game | Secret HS256 partagé entre les deux services |
+| `JWT_ACCESS_TOKEN_EXPIRY` / `REFRESH_TOKEN_EXPIRY` | api-auth | Durées tokens (`15m` / `7d` par défaut) |
+| `CORS_ORIGINS` | api-auth | Liste séparée par virgules (default `https://www.nidalheim.com,http://localhost:3000`) |
+| `AUTH_SECRET` | web/docs | Secret NextAuth |
+| `AUTH_API_URL` | web/docs | URL de api-auth (default `http://localhost:3001`) |
+| `NEXT_PUBLIC_API_AUTH_URL` | web/site | URL de api-auth, inliné au build (default fallback `https://api-auth.nidalheim.com`) |
+| `OPENAI_API_KEY` | api-game | Clé OpenAI (fallback LLM, jamais utilisé en pratique) |
+| `DEEPGRAM_API_KEY` | api-game | Speech-to-text (voice pipeline) |
+| `LLM_API_KEY` | api-game | Clé Groq (text + voice chat) |
+| `LLM_BASE_URL` / `LLM_MODEL` | api-game | Override LLM (default Groq + llama-3.1-8b-instant) |
+| `TTS_PROVIDER` | api-game | `cartesia` (default) ou `elevenlabs` |
+| `CARTESIA_API_KEY` / `CARTESIA_VOICE_ID` / `CARTESIA_MODEL` | api-game | Provider TTS principal |
+| `ELEVENLABS_API_KEY` / `ELEVENLABS_VOICE_ID` | api-game | Provider TTS fallback (optionnel) |
+| `TTS_LANGUAGE_CODE` | api-game | Default `fr` |
 
-Connexion locale : `postgresql://nidalheim:changeme@localhost:5432/nidalheim`
+Connexion locale par défaut : `postgresql://nidalheim:<password>@localhost:5432/nidalheim`.
 
 ## Architecture des services
 
-### api-auth (Express 5 + TypeScript)
-- Routes : `src/routes/` (register, login, refresh, logout, jwks)
-- Services : `src/services/` (jwt.ts, redis.ts, user.ts, db.ts)
-- Auth : JWT RS256 avec cles dans `keys/` (generer via `npm run generate-keys`)
-- Refresh tokens stockes dans Redis
-- Donnees utilisateurs dans PostgreSQL (meme base que services/db)
+### api-auth (Express 5 + TypeScript + npm)
+- Routes REST : `POST /register`, `POST /login`, `POST /refresh`, `POST /logout`, `GET /health`
+- Login accepte **username ou email** comme identifiant
+- JWT **HS256** avec `JWT_SECRET` partagé (le endpoint JWKS a été retiré)
+- Refresh tokens stockés dans Redis avec rotation (TTL 7 jours)
+- bcrypt 12 rounds
+- Users et `player_profiles` dans PostgreSQL (schéma partagé avec `services/db`)
 
-### api-game (WebSocket + JavaScript)
-- Point d'entree unique : `src/index.js`
-- Endpoints WS : `/text-chat` (o3-mini), `/audio` (gpt-4o-realtime, Whisper)
-- Auth par query param `?apiKey=`
+### api-game (WebSocket + JavaScript ESM + pnpm)
+- Endpoints WS : `/text` (chat LLM simple) et `/audio` (pipeline voice streaming)
+- Auth par query param `?token=<JWT>` (vérif HS256 avec `JWT_SECRET`)
 - Heartbeat ping/pong toutes les 30s
+- **`/text`** : Groq Llama 3.1 8B par défaut, historique persistant (table `chat_messages`)
+- **`/audio`** : Deepgram STT → Groq Llama 3.3 70B (streaming) → Cartesia TTS (streaming, persistent WS) ou ElevenLabs (per-turn)
+- Client envoie `audio_config` pour régler le sample rate STT, `COMMIT` pour finaliser une utterance
+- Historique NPC partagé entre `/text` et `/audio` via `ConversationStore` (Postgres)
 
-### db (Drizzle ORM)
-- Schema dans `src/schema/` : `users.ts`, `player-profiles.ts`
+### db (Drizzle ORM + pnpm)
+- Schéma dans `src/schema/` : `users.ts`, `player-profiles.ts`, `chat-messages.ts`
 - Migrations dans `migrations/`
-- Config : `drizzle.config.ts` (lit `infra/.env`)
+- Config : `drizzle.config.ts` (lit `../../infra/.env`)
 
-### web/site et web/docs (Next.js 16)
-- App Router, Tailwind CSS 4, TypeScript
-- Site : Framer Motion, MDX pour patch notes
-- Docs : Nextra theme, pagefind pour la recherche
+### web/site (Next.js 16 App Router)
+- Register, login, UI vitrine, framer-motion, MDX patch notes
+- Appelle `api-auth` via `NEXT_PUBLIC_API_AUTH_URL` (inliné au build, fallback prod hardcodé)
 
-## CI/CD
+### web/docs (Nextra 4.6 + NextAuth)
+- Next 16 App Router avec catch-all route `src/app/docs/[[...mdxPath]]/page.tsx`
+- Contenu MDX dans `content/` (racine du package docs)
+- Proxy/middleware auth : refuse tout user dont `role !== "admin"`
+- Search désactivée (nécessite build pagefind)
 
-GitHub Actions (`.github/workflows/deploy.yml`) :
-1. Push sur `main` → SSH sur VPS
-2. `git pull` + generation `.env` depuis secrets GitHub
-3. `docker compose build && up -d`
-4. `docker compose run --rm db-migrate`
+## Auth — flow complet
+
+1. `web/site` → `POST /register` ou `POST /login` sur `api-auth`
+2. `api-auth` renvoie `{ accessToken, refreshToken, user }`
+3. Le client stocke les tokens (UE5 via `NidalheimAuthStorage`, web via NextAuth session)
+4. UE5 connecte `api-game` via `wss://api-game.nidalheim.com/text?token=<accessToken>`
+5. `api-game` vérifie le JWT avec `JWT_SECRET` (HS256) — même secret que `api-auth`
+6. Refresh : `POST /refresh` avec le refresh token → rotation en Redis
+
+## CI/CD — registry-based
+
+Workflow `.github/workflows/deploy.yml` sur push `main` :
+
+1. **Job `build`** (matrix sur 5 services) :
+   - `docker build` + `docker push` vers `ghcr.io/epitechpromo2027/nidalheim-<service>:{sha,latest}`
+   - Cache GH Actions (`type=gha`) par service
+2. **Job `deploy`** (après build) :
+   - SSH sur VPS via `appleboy/ssh-action`
+   - Écrit `infra/.env` depuis les GH Secrets
+   - `docker login ghcr.io` avec `GHCR_PULL_TOKEN`
+   - `docker compose pull && up -d --remove-orphans`
+   - `docker compose run --rm db-migrate`
+   - `docker image prune -f`
+
+### Secrets GH requis
+- `VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY` — accès SSH
+- `GHCR_PULL_TOKEN` — PAT classique scope `read:packages` pour pull côté VPS (inutile si repo public)
+- `OPENAI_API_KEY`, `DEEPGRAM_API_KEY`, `LLM_API_KEY`, `CARTESIA_API_KEY`, `CARTESIA_VOICE_ID`
+- `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` (optionnels, peuvent être vides)
+- `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`
+- `AUTH_SECRET`, `JWT_SECRET`
 
 ## Domaines (production)
 
 - `www.nidalheim.com` → site
-- `docs.nidalheim.com` → docs
+- `docs.nidalheim.com` → docs (admin-only)
 - `api-auth.nidalheim.com` → auth REST
-- `api-game.nidalheim.com` → game WebSocket
+- `api-game.nidalheim.com` → game WebSocket (nginx avec `proxy_read_timeout 86400s`)
 
 ## Points d'attention
 
-- Pas de tests configures — pas de framework de test en place
-- ESLint uniquement sur web/site et web/docs, pas sur les backends
-- Pas de Prettier configure
+- Pas de tests configurés — pas de framework de test en place
+- ESLint uniquement sur `web/site` et `web/docs`, pas sur les backends
+- Pas de Prettier configuré
 - Line endings mixtes (LF/CRLF)
+- Le `NEXT_PUBLIC_API_AUTH_URL` de `web/site` n'est pas passé au build Docker (utilise le fallback prod hardcodé)
+- `web/docs` utilise `src/proxy.ts` (renommé depuis `middleware.ts` en Next 16)

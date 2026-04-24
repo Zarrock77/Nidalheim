@@ -1,0 +1,158 @@
+---
+title: api-auth
+---
+
+# api-auth
+
+Service REST d'authentification. Express 5 + TypeScript + npm.
+Écoute sur le port **3001**.
+
+## Stack
+
+- **Express 5** (routing, middleware)
+- **jsonwebtoken** — signature et vérif HS256
+- **bcrypt** — 12 rounds pour les mots de passe
+- **ioredis** — refresh tokens store (TTL 7 jours)
+- **pg** — driver PostgreSQL natif (pas de Drizzle côté runtime, SQL direct)
+- **cors** — origines configurables via `CORS_ORIGINS`
+
+## Endpoints
+
+### `POST /register`
+
+Crée un nouveau compte.
+
+**Requête** :
+```json
+{
+  "username": "Zarrock",
+  "email": "user@example.com",
+  "password": "min-8-chars"
+}
+```
+
+**Réponses** :
+- `201 Created` → `{ accessToken, refreshToken }`
+- `400 Bad Request` → champs manquants ou password < 8 chars
+- `409 Conflict` → username ou email déjà utilisé
+
+Crée aussi une ligne dans `player_profiles` avec les valeurs par défaut (xp=0, level=1).
+
+### `POST /login`
+
+Identifiant accepté : **username OU email** (le champ s'appelle `username` mais le lookup fait `WHERE username = $1 OR email = $1`).
+
+**Requête** :
+```json
+{
+  "username": "Zarrock",     // ou "user@example.com"
+  "password": "..."
+}
+```
+
+**Réponses** :
+- `200 OK` → `{ user: { id, username, email, role }, accessToken, refreshToken }`
+- `401 Unauthorized` → credentials invalides
+- `400 Bad Request` → champs manquants
+
+### `POST /refresh`
+
+Rotation du refresh token : l'ancien est révoqué dans Redis, un nouveau couple est émis.
+
+**Requête** : `{ refreshToken }`
+
+**Réponses** :
+- `200 OK` → `{ accessToken, refreshToken }`
+- `401 Unauthorized` → token invalide, expiré ou révoqué
+
+### `POST /logout`
+
+Révoque le refresh token côté Redis. Idempotent : même avec un token invalide, renvoie `200`.
+
+**Requête** : `{ refreshToken }`
+
+**Réponse** : `200 OK` → `{ message: "Logged out successfully" }`
+
+### `GET /health`
+
+Liveness probe. Toujours `200` tant que le process tourne.
+
+**Réponse** : `{ status: "ok", service: "nidalheim-auth" }`
+
+## JWT
+
+- Algorithme : **HS256**
+- Secret : `process.env.JWT_SECRET` (partagé avec `api-game`)
+- Access token expiry : `JWT_ACCESS_TOKEN_EXPIRY` (default `15m`)
+- Refresh token expiry : `JWT_REFRESH_TOKEN_EXPIRY` (default `7d`)
+
+### Payload access token
+
+```ts
+{
+  sub: "uuid-user",   // user id
+  username: "Zarrock",
+  role: "player" | "admin",
+  iat: 1714000000,
+  exp: 1714000900     // +15m
+}
+```
+
+### Payload refresh token
+
+```ts
+{
+  sub: "uuid-user",
+  tokenId: "uuid-random",
+  iat: 1714000000,
+  exp: 1714604800     // +7d
+}
+```
+
+Le `tokenId` est stocké en Redis sous `refresh:<userId>:<tokenId>` avec TTL 7j. Refresh = vérif du JWT + check Redis + delete + insert nouveau couple.
+
+## Flow d'auth côté UE5
+
+```
+1. POST /register → { accessToken (15m), refreshToken (7d) }
+2. Stocker les deux tokens (NidalheimAuthStorage)
+3. Utiliser accessToken pour wss://api-game/?token=<jwt>
+4. Si accessToken expire → POST /refresh → nouveau couple
+5. Déco : POST /logout pour invalider le refresh
+```
+
+## CORS
+
+La liste des origines autorisées est lue depuis `CORS_ORIGINS` (CSV) :
+
+```bash
+CORS_ORIGINS=https://www.nidalheim.com,https://docs.nidalheim.com,http://localhost:3000
+```
+
+Default si absente : `https://www.nidalheim.com,http://localhost:3000`.
+
+## Sécurité
+
+- **bcrypt 12 rounds** sur les mots de passe
+- **JWT signé HS256** avec un secret 64 bytes aléatoire
+- **Refresh tokens rotatifs** (réutiliser un refresh token révoqué → 401)
+- **Idempotent logout** (pas de leak d'info sur la validité d'un token)
+- **Express 5 + cors + express.json** standards
+
+## Structure du code
+
+```
+services/api-auth/src/
+├── loadEnv.ts              # Charge ../../infra/.env avant les autres imports
+├── index.ts                # Express app + routes + CORS
+├── routes/
+│   ├── register.ts
+│   ├── login.ts
+│   ├── refresh.ts
+│   └── logout.ts
+└── services/
+    ├── jwt.ts              # signAccessToken, signRefreshToken, verifyToken (HS256)
+    ├── user.ts             # createUser, authenticateUser, getUserById
+    ├── redis.ts            # store/isValid/revoke refresh tokens
+    └── db.ts               # Pool pg avec DATABASE_URL
+```
