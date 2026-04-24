@@ -91,5 +91,6 @@ jobs:
             cd infra
             docker compose pull
             docker compose up -d --remove-orphans
+            docker compose restart nginx
             docker compose run --rm db-migrate
             docker image prune -f
