@@ -10,10 +10,10 @@ Nidalheim — monorepo backend pour un jeu UE5 (dark fantasy nordique). Auth JWT
 services/api-auth/   # API REST auth (Express 5, JWT HS256, bcrypt, Redis, PostgreSQL)
 services/api-game/   # API WebSocket temps-réel (ws, Groq LLM, Deepgram STT, Cartesia TTS)
 services/db/         # Schema + migrations PostgreSQL (Drizzle ORM)
-services/p4d/        # Serveur Perforce (assets UE5) — géré séparément
 web/site/            # Site vitrine + register/login (Next.js 16, React 19, Tailwind 4)
 web/docs/            # Documentation interne (Nextra 4, admin-only)
 infra/               # Docker Compose, Nginx reverse proxy, .env
+infra/p4d/           # Serveur Perforce (assets UE5) — stack Docker séparé
 ```
 
 ## Commandes

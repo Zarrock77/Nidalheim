@@ -13,14 +13,14 @@ nidalheim/
 ├── services/
 │   ├── api-auth/      # Express 5 REST (auth)
 │   ├── api-game/      # ws WebSocket (IA temps-réel)
-│   ├── db/            # Drizzle schéma + migrations
-│   └── p4d/           # Perforce (assets UE5) — hors compose
+│   └── db/            # Drizzle schéma + migrations
 ├── web/
 │   ├── site/          # Next.js vitrine
 │   └── docs/          # Nextra docs admin
 └── infra/
     ├── docker-compose.yml
     ├── nginx/         # reverse proxy
+    ├── p4d/           # Perforce (assets UE5) — stack Docker séparé
     └── .env.example
 ```
 

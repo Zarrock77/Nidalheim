@@ -9,14 +9,14 @@ nidalheim/
 ├── services/
 │   ├── api-auth/      # API REST d'authentification (Express 5, JWT HS256, Postgres, Redis)
 │   ├── api-game/      # API WebSocket temps-réel (PNJ IA text + voice)
-│   ├── db/            # Schéma PostgreSQL et migrations (Drizzle ORM)
-│   └── p4d/           # Serveur Perforce (assets UE5) — géré séparément
+│   └── db/            # Schéma PostgreSQL et migrations (Drizzle ORM)
 ├── web/
 │   ├── site/          # Site vitrine + register/login (Next.js 16, Tailwind 4)
 │   └── docs/          # Documentation interne (Nextra 4, admin-only)
 └── infra/
     ├── docker-compose.yml
     ├── nginx/         # Reverse proxy (4 sous-domaines)
+    ├── p4d/           # Serveur Perforce (assets UE5) — stack Docker séparé
     └── .env.example
 ```
 

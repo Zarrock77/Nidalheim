@@ -20,8 +20,8 @@ FROM node:22-slim AS run
 WORKDIR /app
 
 ENV NODE_ENV=production
-ENV PORT=3001
-EXPOSE 3001
+ENV PORT=3000
+EXPOSE 3000
 
 # User non-root
 RUN addgroup --system --gid 1001 nodejs \
