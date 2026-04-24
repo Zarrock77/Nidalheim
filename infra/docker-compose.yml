@@ -23,6 +23,8 @@ services:
       - NODE_ENV=production
       - AUTH_SECRET=${AUTH_SECRET}
       - AUTH_API_URL=http://nidalheim-api-auth:3001
+      - AUTH_URL=https://docs.nidalheim.com
+      - AUTH_TRUST_HOST=true
     networks:
       - nidalheim-network
 
