@@ -15,6 +15,13 @@
       "when": 1777057681863,
       "tag": "0001_mute_loners",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1777075258040,
+      "tag": "0002_icy_skaar",
+      "breakpoints": true
     }
   ]
 }

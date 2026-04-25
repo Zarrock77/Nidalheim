@@ -2,7 +2,7 @@ import WebSocket, { WebSocketServer } from "ws";
 import OpenAI from "openai";
 import { AudioPipeline } from "./audioPipeline.js";
 import { ConversationStore } from "./conversationStore.js";
-import { SYSTEM_PROMPT } from "./systemPrompt.js";
+import { getNpc } from "./npcStore.js";
 import http from "http";
 import jwt from "jsonwebtoken";
 import { config } from "dotenv";
@@ -47,41 +47,43 @@ const textChatClient = new OpenAI({
 });
 const textChatModel = process.env.LLM_MODEL || "llama-3.1-8b-instant";
 
-async function handleTextConnection(websocket, user) {
-    console.log(`Client connected to text endpoint (user: ${user.username})`);
+async function handleTextConnection(websocket, user, npc) {
+    console.log(`Client connected to text endpoint (user: ${user.username}, npc: ${npc.id})`);
     startHeartbeat(websocket);
 
     const store = new ConversationStore({ maxHistory: 20 });
     let history = [];
     try {
-        history = await store.loadRecent(user.id);
+        history = await store.loadRecent(user.id, npc.id);
         if (history.length > 0) {
-            console.log(`[text ${user.username}] restored ${history.length} past messages`);
+            console.log(`[text ${user.username}/${npc.id}] restored ${history.length} past messages`);
         }
     } catch (err) {
-        console.error(`[text ${user.username}] history load failed:`, err?.message ?? err);
+        console.error(`[text ${user.username}/${npc.id}] history load failed:`, err?.message ?? err);
     }
+
+    const model = npc.llmModel || textChatModel;
 
     websocket.on("message", async (message) => {
         const userText = message.toString().trim();
         if (!userText) return;
-        console.log(`[text ${user.username}] user: ${userText}`);
+        console.log(`[text ${user.username}/${npc.id}] user: ${userText}`);
 
         history.push({ role: "user", content: userText });
         const messages = [
-            { role: "system", content: SYSTEM_PROMPT },
+            { role: "system", content: npc.systemPrompt },
             ...history,
         ];
 
         let reply;
         try {
             const response = await textChatClient.chat.completions.create({
-                model: textChatModel,
+                model,
                 messages,
             });
             reply = response.choices[0]?.message?.content ?? "";
         } catch (err) {
-            console.error(`[text ${user.username}] LLM error:`, err?.message ?? err);
+            console.error(`[text ${user.username}/${npc.id}] LLM error:`, err?.message ?? err);
             websocket.send("Error generating response.");
             // Remove the un-answered user turn so we don't get a lopsided history.
             history.pop();
@@ -91,16 +93,16 @@ async function handleTextConnection(websocket, user) {
         history.push({ role: "assistant", content: reply });
         if (history.length > 40) history.splice(0, history.length - 40);
 
-        console.log(`[text ${user.username}] npc: ${reply}`);
+        console.log(`[text ${user.username}/${npc.id}] npc: ${reply}`);
         websocket.send(reply);
 
         store
-            .appendTurn(user.id, userText, reply, "text")
-            .catch((err) => console.error(`[text ${user.username}] save failed:`, err?.message ?? err));
+            .appendTurn(user.id, npc.id, userText, reply, "text")
+            .catch((err) => console.error(`[text ${user.username}/${npc.id}] save failed:`, err?.message ?? err));
     });
 
     websocket.on("close", () => {
-        console.log(`Client disconnected from text endpoint (user: ${user.username})`);
+        console.log(`Client disconnected from text endpoint (user: ${user.username}, npc: ${npc.id})`);
     });
 
     websocket.on("error", (error) => {
@@ -108,25 +110,25 @@ async function handleTextConnection(websocket, user) {
     });
 }
 
-function handleAudioConnection(clientWs, user) {
-    console.log(`Client connected to audio endpoint (user: ${user.username})`);
+function handleAudioConnection(clientWs, user, npc) {
+    console.log(`Client connected to audio endpoint (user: ${user.username}, npc: ${npc.id})`);
     startHeartbeat(clientWs);
 
-    const pipeline = new AudioPipeline(clientWs, user, {
+    const pipeline = new AudioPipeline(clientWs, user, npc, {
         deepgramKey: process.env.DEEPGRAM_API_KEY,
         debugAudioDump: process.env.DEBUG_AUDIO_DUMP === "1",
 
         ttsProvider: process.env.TTS_PROVIDER || "cartesia",
         elevenlabsKey: process.env.ELEVENLABS_API_KEY,
-        elevenlabsVoiceId: process.env.ELEVENLABS_VOICE_ID,
+        elevenlabsVoiceId: npc.voiceId || process.env.ELEVENLABS_VOICE_ID,
         cartesiaKey: process.env.CARTESIA_API_KEY,
-        cartesiaVoiceId: process.env.CARTESIA_VOICE_ID,
-        cartesiaModel: process.env.CARTESIA_MODEL || "sonic-2",
+        cartesiaVoiceId: npc.voiceId || process.env.CARTESIA_VOICE_ID,
+        cartesiaModel: npc.ttsModel || process.env.CARTESIA_MODEL || "sonic-2",
         ttsLanguageCode: process.env.TTS_LANGUAGE_CODE || "fr",
 
         openaiKey: OPENAI_API_KEY,
         llmApiKey: process.env.LLM_API_KEY || process.env.GROQ_API_KEY,
-        llmModel: process.env.LLM_MODEL || "llama-3.3-70b-versatile",
+        llmModel: npc.llmModel || process.env.LLM_MODEL || "llama-3.3-70b-versatile",
         llmBaseUrl: process.env.LLM_BASE_URL || "https://api.groq.com/openai/v1",
     });
 
@@ -188,13 +190,14 @@ function main() {
 
     const wss = new WebSocketServer({ noServer: true });
 
-    server.on("upgrade", (request, socket, head) => {
+    server.on("upgrade", async (request, socket, head) => {
         const ip = request.socket.remoteAddress;
         const fwd = request.headers["x-forwarded-for"];
         const clientIp = typeof fwd === "string" && fwd.length > 0 ? fwd.split(",")[0].trim() : ip;
         const url = new URL(request.url, `http://${request.headers.host}`);
         const path = url.pathname;
         const token = url.searchParams.get("token");
+        const npcIdParam = url.searchParams.get("npc");
 
         console.log(`[upgrade ${clientIp}] ${request.method} ${request.url} (host=${request.headers.host})`);
 
@@ -217,15 +220,26 @@ function main() {
             return;
         }
 
-        console.log(`[auth ${clientIp}] OK ${path} user=${user.username} (sub=${user.sub}) token=${tokenPreview}`);
+        // Resolve the NPC the client wants to talk to. Falls back to "default"
+        // if the client doesn't pass ?npc= or sends an unknown id.
+        let npc;
+        try {
+            npc = await getNpc(npcIdParam);
+        } catch (err) {
+            console.log(`[auth ${clientIp}] REJECTED ${path}: npc lookup failed — ${err.message}`);
+            socket.destroy();
+            return;
+        }
+
+        console.log(`[auth ${clientIp}] OK ${path} user=${user.username} npc=${npc.id} token=${tokenPreview}`);
 
         if (path === "/text") {
             wss.handleUpgrade(request, socket, head, (ws) => {
-                handleTextConnection(ws, user);
+                handleTextConnection(ws, user, npc);
             });
         } else if (path === "/audio") {
             wss.handleUpgrade(request, socket, head, (ws) => {
-                handleAudioConnection(ws, user);
+                handleAudioConnection(ws, user, npc);
             });
         } else {
             console.log(`[auth ${clientIp}] REJECTED ${path}: unknown endpoint (user=${user.username})`);

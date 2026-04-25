@@ -6,10 +6,13 @@ export const chatMessages = pgTable(
   {
     id: uuid('id').primaryKey().defaultRandom(),
     userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+    npcId: varchar('npc_id', { length: 100 }).notNull().default('default'),
     role: varchar('role', { length: 20 }).notNull(),
     content: text('content').notNull(),
     channel: varchar('channel', { length: 20 }),
     createdAt: timestamp('created_at').defaultNow().notNull(),
   },
-  (t) => [index('idx_chat_messages_user_created').on(t.userId, t.createdAt)],
+  (t) => [
+    index('idx_chat_messages_user_npc_created').on(t.userId, t.npcId, t.createdAt),
+  ],
 );

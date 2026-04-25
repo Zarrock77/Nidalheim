@@ -6,7 +6,6 @@ import { ElevenLabsStreamingTTS } from "./providers/elevenlabs.js";
 import { CartesiaStreamingTTS } from "./providers/cartesia.js";
 import { LLMStreaming } from "./providers/llm.js";
 import { ConversationStore } from "./conversationStore.js";
-import { SYSTEM_PROMPT } from "./systemPrompt.js";
 
 const KEEPALIVE_INTERVAL_MS = 8000;
 
@@ -36,13 +35,14 @@ function makeTTS(config) {
  * opened per reply (accepting the handshake cost).
  */
 export class AudioPipeline {
-    constructor(clientWs, user, config) {
+    constructor(clientWs, user, npc, config) {
         this.clientWs = clientWs;
         this.user = user;
+        this.npc = npc;
         this.config = config;
         this.stt = new DeepgramStreamingSTT(config.deepgramKey);
         this.llm = new LLMStreaming(config.llmApiKey ?? config.openaiKey, {
-            systemPrompt: SYSTEM_PROMPT,
+            systemPrompt: npc.systemPrompt,
             model: config.llmModel,
             baseURL: config.llmBaseUrl,
         });
@@ -102,7 +102,7 @@ export class AudioPipeline {
         // the first PTT.
         const hydrate = (async () => {
             try {
-                const history = await this.conversationStore.loadRecent(this.user.id);
+                const history = await this.conversationStore.loadRecent(this.user.id, this.npc.id);
                 if (history.length > 0) {
                     this.llm.setHistory(history);
                     console.log(`[pipeline ${this.user.username}] restored ${history.length} past messages`);
@@ -297,8 +297,8 @@ export class AudioPipeline {
                     }
                 });
                 this.conversationStore
-                    .appendTurn(this.user.id, userText, full, "audio")
-                    .catch((err) => console.error(`[pipeline ${this.user.username}] history save failed:`, err?.message ?? err));
+                    .appendTurn(this.user.id, this.npc.id, userText, full, "audio")
+                    .catch((err) => console.error(`[pipeline ${this.user.username}/${this.npc.id}] history save failed:`, err?.message ?? err));
             },
             onError: (err) => {
                 this._send({ type: "error", message: `llm: ${err?.message ?? err}` });

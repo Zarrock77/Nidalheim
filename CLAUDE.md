@@ -112,15 +112,17 @@ Connexion locale par défaut : `postgresql://nidalheim:<password>@localhost:5432
 ### api-game (WebSocket + JavaScript ESM + pnpm)
 - Endpoints WS : `/text` (chat LLM simple) et `/audio` (pipeline voice streaming)
 - Auth par query param `?token=<JWT>` (vérif HS256 avec `JWT_SECRET`)
+- Sélection du PNJ via query param `?npc=<id>` (fallback `default` si absent ou inconnu)
 - Heartbeat ping/pong toutes les 30s
-- **`/text`** : Groq Llama 3.1 8B par défaut, historique persistant (table `chat_messages`)
+- **`/text`** : Groq Llama 3.1 8B par défaut, historique persistant (table `chat_messages` scopée par `(user_id, npc_id)`)
 - **`/audio`** : Deepgram STT → Groq Llama 3.3 70B (streaming) → Cartesia TTS (streaming, persistent WS) ou ElevenLabs (per-turn)
 - Client envoie `audio_config` pour régler le sample rate STT, `COMMIT` pour finaliser une utterance
-- Historique NPC partagé entre `/text` et `/audio` via `ConversationStore` (Postgres)
+- Historique conversationnel par PNJ partagé entre `/text` et `/audio` via `ConversationStore` (Postgres)
+- Chaque PNJ a son propre `system_prompt` + `voice_id` + `llm_model` dans la table `npcs` (cache mémoire process via `npcStore`)
 
 ### db (Drizzle ORM + pnpm)
-- Schéma dans `src/schema/` : `users.ts`, `player-profiles.ts`, `chat-messages.ts`
-- Migrations dans `migrations/`
+- Schéma dans `src/schema/` : `users.ts`, `player-profiles.ts`, `chat-messages.ts`, `npcs.ts`
+- Migrations dans `migrations/` ; le seed du NPC `default` est inclus dans `0002_*` (INSERT ... ON CONFLICT DO NOTHING)
 - Config : `drizzle.config.ts` (lit `../../infra/.env`)
 
 ### web/site (Next.js 16 App Router)
