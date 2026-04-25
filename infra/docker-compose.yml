@@ -43,6 +43,8 @@ services:
       - JWT_REFRESH_TOKEN_EXPIRY=7d
       - REDIS_URL=redis://redis:6379
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - DEVICE_VERIFICATION_BASE_URL=https://www.nidalheim.com
+      - CORS_ORIGINS=https://www.nidalheim.com,https://docs.nidalheim.com
     depends_on:
       - redis
       - postgres

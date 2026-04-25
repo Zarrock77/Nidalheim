@@ -102,7 +102,14 @@ Connexion locale par défaut : `postgresql://nidalheim:<password>@localhost:5432
 ## Architecture des services
 
 ### api-auth (Express 5 + TypeScript + npm)
-- Routes REST : `POST /register`, `POST /login`, `POST /refresh`, `POST /logout`, `GET /health`
+- Routes REST classiques : `POST /register`, `POST /login`, `POST /refresh`, `POST /logout`, `GET /health`
+- Routes Device Authorization Grant (RFC 8628) pour le client UE5 :
+  - `POST /device/authorize` (no auth) → `{ device_code, user_code, verification_uri, ... }`
+  - `POST /device/lookup` (Bearer auth) → metadata pour la page d'approbation
+  - `POST /device/approve` (Bearer auth) → mint un nouveau couple de tokens pour le device
+  - `POST /device/deny` (Bearer auth) → refuse l'autorisation
+  - `POST /device/token` (no auth) → poll, retourne tokens si approved
+  - State Redis avec TTL 10 min, user_code 8 chars sur alphabet sans I/O/0/1
 - Login accepte **username ou email** comme identifiant
 - JWT **HS256** avec `JWT_SECRET` partagé (le endpoint JWKS a été retiré)
 - Refresh tokens stockés dans Redis avec rotation (TTL 7 jours)
