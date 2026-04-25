@@ -79,6 +79,77 @@ Liveness probe. Toujours `200` tant que le process tourne.
 
 **Réponse** : `{ status: "ok", service: "nidalheim-auth" }`
 
+## Device Authorization Grant (RFC 8628)
+
+Pour le client UE5 qui ne peut pas afficher de formulaire de login confortablement, on expose un flow OAuth standard où le jeu ouvre un browser vers `www.nidalheim.com/device` pour que le joueur approuve.
+
+Voir **[Authentification](/docs/auth#device-flow)** pour le diagramme complet et les détails.
+
+### `POST /device/authorize` *(no auth)*
+
+Émis par UE5 au démarrage de l'écran de connexion.
+
+**Body** : `{}`
+
+**Réponse 200** :
+```json
+{
+  "device_code": "<64 hex chars opaque>",
+  "user_code": "ABCD-EFGH",
+  "verification_uri": "https://www.nidalheim.com/device",
+  "verification_uri_complete": "https://www.nidalheim.com/device?code=ABCD-EFGH",
+  "expires_in": 600,
+  "interval": 5,
+  "interval_ms": 1000
+}
+```
+
+`user_code` utilise un alphabet sans caractères ambigus (pas de `I`, `O`, `0`, `1`).
+
+### `POST /device/token` *(no auth)*
+
+Polled par UE5 toutes les `interval_ms` ms.
+
+**Body** : `{ "device_code": "..." }`
+
+**Réponses possibles** :
+- `200 OK` → `{ user, accessToken, refreshToken }` (one-shot, le record est consommé)
+- `400` + `{ "error": "authorization_pending" }` → poll continuer
+- `400` + `{ "error": "slow_down" }` → augmenter l'interval
+- `400` + `{ "error": "access_denied" }` → l'user a refusé
+- `400` + `{ "error": "expired_token" }` → 10 min écoulées, le record n'existe plus
+
+### `POST /device/lookup` *(Bearer auth)*
+
+Appelé par la page `/device` une fois le user loggé, pour vérifier que le code existe avant d'afficher la confirmation.
+
+**Body** : `{ "user_code": "ABCD-EFGH" }`
+
+**Réponse 200** : `{ user_code, client_name, expires_in }`
+
+### `POST /device/approve` *(Bearer auth)*
+
+Appelé quand le user clique le bouton **Approve** sur la page `/device`.
+
+**Body** : `{ "user_code": "ABCD-EFGH" }`
+
+**Réponse 200** : `{ "status": "approved" }`
+
+Mint un **nouveau couple de tokens** pour la session device (séparés du couple utilisé pour le web), les stocke dans le record Redis. Le poll `/device/token` suivant les renvoie au client UE5.
+
+### `POST /device/deny` *(Bearer auth)*
+
+Symétrique d'`approve`. Marque le record comme `denied`. Le poll `/device/token` suivant retournera `access_denied`.
+
+### Stockage Redis
+
+| Key | Valeur | TTL |
+|-----|--------|-----|
+| `device:<device_code>` | JSON `{ status, user_code, expires_at, [user, access_token, refresh_token] }` | 600s |
+| `usercode:<user_code>` | `<device_code>` (réverse lookup pour la page web) | 600s |
+
+Le record est **consommé** (DELETE Redis) au premier `/device/token` qui retourne 200 — pas de rejeu possible.
+
 ## JWT
 
 - Algorithme : **HS256**
@@ -149,10 +220,12 @@ services/api-auth/src/
 │   ├── register.ts
 │   ├── login.ts
 │   ├── refresh.ts
-│   └── logout.ts
+│   ├── logout.ts
+│   └── device.ts           # RFC 8628 (authorize / lookup / approve / deny / token)
 └── services/
     ├── jwt.ts              # signAccessToken, signRefreshToken, verifyToken (HS256)
     ├── user.ts             # createUser, authenticateUser, getUserById
     ├── redis.ts            # store/isValid/revoke refresh tokens
+    ├── devices.ts          # Redis-backed device records, user_code generation
     └── db.ts               # Pool pg avec DATABASE_URL
 ```

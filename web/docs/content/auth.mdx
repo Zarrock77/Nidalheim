@@ -130,6 +130,60 @@ Content-Type: application/json
 
 **Côté serveur** : decode le JWT (best-effort), delete la clé Redis. Pas de SQL, pas de side-effect au-delà.
 
+## Device flow (UE5)
+
+Le client UE5 ne peut pas afficher confortablement un formulaire user/password — il utilise donc le **OAuth 2.0 Device Authorization Grant** ([RFC 8628](https://www.rfc-editor.org/rfc/rfc8628)). Le joueur se logue via son navigateur sur `www.nidalheim.com/device` et approuve la session de jeu.
+
+### Diagramme
+
+```
+┌──────────┐   1. POST /device/authorize       ┌──────────┐
+│  UE5     │ ──────────────────────────────▶  │ api-auth │
+│          │ ◀── { device_code, user_code, ──  │          │
+│          │       verification_uri,           │          │
+│          │       interval, expires_in }      │          │
+└────┬─────┘                                   └────┬─────┘
+     │                                              │
+     │ 2. LaunchURL(verification_uri_complete)      │ Redis: device:<dc>
+     ▼                                              │        usercode:<uc>
+┌──────────┐                                        │
+│ Browser  │   3. /device?code=ABCD-EFGH            │
+│  /device │ ──────────▶ login si nécessaire        │
+│          │ ──────────▶ POST /device/lookup        │
+│          │ ──────────▶ POST /device/approve  ──▶  ├── mint new tokens,
+└──────────┘                                        │   update record
+                                                    │   (status=approved)
+┌──────────┐   4. POST /device/token (poll)        │
+│  UE5     │ ──────────────────────────────▶  ─────┤
+│          │ ◀── pending  pending  pending ───────┤
+│          │ ◀── { user, accessToken, ... } ─────  ◀── consume record
+└──────────┘   5. WS connection avec le token       (one-shot)
+```
+
+### Étapes côté client UE5
+
+1. `RequestDeviceCode` → `POST /device/authorize` → reçoit `device_code`, `user_code`, `verification_uri_complete`
+2. Affiche le `user_code` à l'écran et `LaunchURL(verification_uri_complete)` pour ouvrir le browser
+3. Lance un timer qui poll `POST /device/token` toutes les `interval_ms` (default 1s)
+4. Sur `200` → tokens reçus, état `Authenticated`. Sur `expired_token` ou `access_denied` → état `Failed`.
+
+Détails dans **[api-auth → Device Authorization Grant](/docs/services/api-auth#device-authorization-grant-rfc-8628)**.
+
+### Étapes côté web `/device`
+
+1. Si pas connecté → bouton "Sign in" qui redirect vers `/login?returnTo=/device?code=...`
+2. Si connecté → `POST /device/lookup` (Bearer auth) pour vérifier que le code existe et est encore pending
+3. Affiche le code + boutons **Approve** / **Deny**
+4. Click Approve → `POST /device/approve` → screen "Device authorized"
+5. Click Deny → `POST /device/deny` → screen "Sign-in denied"
+
+### Sécurité
+
+- `user_code` 8 chars sur alphabet **sans `I/O/0/1`** → 31⁸ ≈ 8·10¹¹ possibilités, TTL 10 min, collision check à la création
+- `device_code` 64 hex chars (32 bytes random) → opaque, jamais affiché
+- **Tokens device séparés** des tokens web : approuver depuis le navigateur ne révoque pas la session web, et logout web ne tue pas la session de jeu
+- **One-shot consume** : le record Redis est `DEL` au premier poll qui retourne `200` → pas de rejeu si quelqu'un intercepte le device_code
+
 ## Stockage des tokens côté client
 
 ### UE5
