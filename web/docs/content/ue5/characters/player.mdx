@@ -1,0 +1,142 @@
+---
+title: PlayerCharacter
+---
+
+# PlayerCharacter
+
+`ANidalheimPlayerCharacter` — le pion contrôlable par le joueur.
+
+## Hiérarchie
+
+```
+ACharacter (Unreal)
+└── ANidalheimCharacterBase           (GAS : ASC + Attributes + Abilities)
+    └── ANidalheimPlayerCharacter     (config capsule + character movement)
+```
+
+## Responsabilités du C++
+
+> ⚠️ **Refactor récent** : tout le binding d'input + camera + spring arm a été retiré du C++. Le character C++ ne contient plus que la config capsule + character movement. Tout le reste (camera, spring arm, input handling) est en Blueprint.
+
+```cpp
+// Source/Nidalheim/Character/NidalheimPlayerCharacter.cpp
+ANidalheimPlayerCharacter::ANidalheimPlayerCharacter()
+{
+    GetCapsuleComponent()->InitCapsuleSize(42.f, 96.0f);
+
+    GetCharacterMovement()->bOrientRotationToMovement = true;
+    GetCharacterMovement()->RotationRate = FRotator(0.0f, 500.0f, 0.0f);
+    GetCharacterMovement()->JumpZVelocity = 500.f;
+    GetCharacterMovement()->AirControl = 0.35f;
+    GetCharacterMovement()->MaxWalkSpeed = 500.f;
+    GetCharacterMovement()->MinAnalogWalkSpeed = 20.f;
+    GetCharacterMovement()->BrakingDecelerationWalking = 2000.f;
+    GetCharacterMovement()->BrakingDecelerationFalling = 1500.0f;
+}
+```
+
+C'est tout. Tout le reste est en Blueprint.
+
+## Input — full Blueprint
+
+### Qui fait quoi
+
+| Composant | Responsabilité |
+|---|---|
+| `ANidalheimPlayerController` (C++) | `AddMappingContext` (IMC_Default) via `UEnhancedInputLocalPlayerSubsystem` au début du jeu |
+| `ANidalheimPlayerCharacter` (C++) | Capsule + CharacterMovement only |
+| `BP_PlayerCharacter` (BP) | Camera, spring arm, Enhanced Input Action events → `Add Movement Input` / `Add Controller Yaw Input` / `Jump` |
+
+### Pourquoi tout en BP ?
+
+- **Itération rapide** sans recompiler (sensibilité souris, courbes de mouvement)
+- **Branchement direct** d'effets (sons de pas, anim triggers, screen shake) sans passer par le C++
+- La logique input est triviale (`AddMovementInput` × 2, `AddControllerYawInput`, `Jump`) — pas de gain à la garder en C++
+
+### Câblage type dans `BP_PlayerCharacter`
+
+```
+[Enhanced Input Action IA_Move] (Action Value Vector2D)
+  ├─ Get Control Rotation → Break Rotator → Make Rotator(Yaw) → Get Forward Vector
+  │     × Action Value.Y → Add Movement Input
+  └─ Get Control Rotation → Break Rotator → Make Rotator(Yaw) → Get Right Vector
+        × Action Value.X → Add Movement Input
+
+[Enhanced Input Action IA_Look] / [IA_MouseLook] (Action Value Vector2D)
+  ├─ Action Value.X → Add Controller Yaw Input
+  └─ Action Value.Y → Add Controller Pitch Input
+
+[Enhanced Input Action IA_Jump]
+  ├─ Started   → Jump
+  └─ Completed → Stop Jumping
+```
+
+## Camera — full Blueprint
+
+Le `BP_PlayerCharacter` ajoute :
+- Un `SpringArmComponent` (camera boom) attaché au mesh ou au capsule
+- Une `CameraComponent` attachée au socket du spring arm
+- Configuration (target arm length, lag, rotation) directement en éditeur
+
+Pas de C++ pour ça — itère sur la sensation caméra sans recompile.
+
+## GAS — Gameplay Ability System
+
+Le character hérite de `ANidalheimCharacterBase` qui intègre la stack GAS standard Epic.
+
+### Composants
+
+```cpp
+// ANidalheimCharacterBase
+UPROPERTY(VisibleAnywhere)
+UNidalheimAbilitySystemComponent* AbilitySystemComponent;
+
+UPROPERTY(VisibleAnywhere)
+UNidalheimAttributeSet* AttributeSet;
+
+UPROPERTY(EditDefaultsOnly, Category = "Abilities")
+TArray<TSubclassOf<UNidalheimGameplayAbility>> StartingAbilities;
+```
+
+### Lifecycle
+
+```
+PossessedBy(Controller)
+  → AbilitySystemComponent->InitAbilityActorInfo(this, this)
+  → For each StartingAbility:
+      AbilitySystemComponent->GiveAbility(FGameplayAbilitySpec(...))
+```
+
+### Ajouter une ability
+
+1. Sous-classer `UNidalheimGameplayAbility` dans `Source/Nidalheim/AbilitySystem/Abilities/`
+2. Override `ActivateAbility` (et éventuellement `CanActivateAbility`, `EndAbility`)
+3. L'ajouter à `StartingAbilities` du `BP_PlayerCharacter` (Class Defaults > Abilities)
+
+### Ajouter un attribut
+
+1. Étendre `UNidalheimAttributeSet` dans `Source/Nidalheim/AbilitySystem/Attributes/`
+2. Déclarer le `FGameplayAttributeData` + macros `ATTRIBUTE_ACCESSORS`
+3. Ajouter la réplication via `OnRep_*` callback + `GetLifetimeReplicatedProps`
+
+### Réplication
+
+```cpp
+void UNidalheimAttributeSet::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+    Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+    DOREPLIFETIME_CONDITION_NOTIFY(UNidalheimAttributeSet, Health, COND_None, REPNOTIFY_Always);
+    // …
+}
+
+void UNidalheimAttributeSet::OnRep_Health(const FGameplayAttributeData& OldHealth)
+{
+    GAMEPLAYATTRIBUTE_REPNOTIFY(UNidalheimAttributeSet, Health, OldHealth);
+}
+```
+
+## Voir aussi
+
+- [Conventions UE5](/docs/ue5/conventions) — naming Epic + préfixe `Nidalheim`
+- [NPCCharacter](/docs/ue5/characters/npc) — l'autre branche de la hiérarchie
+- [Aperçu — Source layout](/docs/ue5/overview#source-layout-sourcenidalheim)

@@ -1,0 +1,148 @@
+---
+title: Authentification (UE5)
+---
+
+# Authentification — côté client UE5
+
+Le flow Device Authorization Grant (RFC 8628) côté serveur est documenté dans [Authentification → Device flow (UE5)](/docs/auth#device-flow-ue5). Cette page couvre l'implémentation côté client.
+
+## Vue d'ensemble
+
+```
+┌──────────────────────┐
+│ UNidalheimAuthSubsystem (UGameInstanceSubsystem)
+│ ├─ État (ENidalheimAuthState : Uninitialized → Authenticating → Authenticated)
+│ ├─ Polling timer
+│ ├─ Refresh silencieux (~60s avant expiry)
+│ └─ EnsureFreshAccessToken(callback)  ← API canonique
+│
+│   uses ↓
+│ ┌──────────────────┐         ┌────────────────────┐
+│ │ FNidalheimAuth   │         │ FNidalheimAuth     │
+│ │ Client           │         │ Storage            │
+│ │ (HTTP requests)  │         │ (token persist)    │
+│ └──────────────────┘         └────────────────────┘
+└──────────────────────┘
+```
+
+## Composants
+
+### `FNidalheimAuthClient`
+
+HTTP bas niveau. Wrap `FHttpModule::Get().CreateRequest()`.
+
+```cpp
+// Source/Nidalheim/Auth/NidalheimAuthClient.h
+class NIDALHEIM_API FNidalheimAuthClient
+{
+public:
+    void RequestDeviceCode(FOnDeviceAuthorizeResult OnComplete);
+    void PollDeviceToken(const FString& DeviceCode, FOnDeviceTokenResult OnComplete);
+    void RefreshAccessToken(const FString& RefreshToken, FOnRefreshResult OnComplete);
+    void Logout(const FString& RefreshToken, FOnLogoutResult OnComplete);
+};
+```
+
+### `FNidalheimAuthStorage`
+
+Persistance des tokens (disque local). Survit aux relancements du jeu — l'utilisateur n'a pas à re-auth si le refresh token est encore valide (TTL 7 jours).
+
+### `UNidalheimAuthSubsystem`
+
+`UGameInstanceSubsystem` — instancié au démarrage du `UGameInstance`. C'est le point d'entrée canonique.
+
+```cpp
+// Public API Blueprint
+UFUNCTION(BlueprintCallable, Category = "Nidalheim|Auth")
+void StartDeviceAuthorization();
+
+UFUNCTION(BlueprintCallable, Category = "Nidalheim|Auth")
+void CancelAuthorization();
+
+UFUNCTION(BlueprintCallable, Category = "Nidalheim|Auth")
+void LogoutAsync();
+
+UFUNCTION(BlueprintPure, Category = "Nidalheim|Auth")
+ENidalheimAuthState GetAuthState() const;
+
+UFUNCTION(BlueprintPure, Category = "Nidalheim|Auth")
+const FNidalheimUser& GetUser() const;
+
+UPROPERTY(BlueprintAssignable, Category = "Nidalheim|Auth")
+FOnNidalheimAuthStateChanged OnAuthStateChanged;
+
+UPROPERTY(BlueprintAssignable, Category = "Nidalheim|Auth")
+FOnNidalheimAuthUserCodeReady OnUserCodeReady;
+
+// API C++ uniquement (FOnTokenReady non-dynamic)
+void EnsureFreshAccessToken(FOnTokenReady OnReady);
+```
+
+## Étapes du flow client
+
+1. UI ou code appelle `UNidalheimAuthSubsystem::StartDeviceAuthorization()`
+2. `FNidalheimAuthClient::RequestDeviceCode` → `POST /device/authorize` sur `api-auth.nidalheim.com`
+3. Backend renvoie `{ device_code, user_code, verification_uri, interval, expires_in }`
+4. Subsystem broadcast `OnUserCodeReady(user_code)` — l'UI affiche le code
+5. `LaunchURL("https://www.nidalheim.com/link")` ouvre le navigateur
+6. Pendant ce temps, polling : `POST /device/token` toutes les `interval` secondes (jitter optionnel via `interval_ms`)
+7. Au succès : tokens reçus → état `Authenticated`, persistance via `FNidalheimAuthStorage`
+8. Timer de refresh silencieux armé : ~60s avant `accessExpiresAt`, appelle `RefreshAccessToken` automatiquement
+
+## États (`ENidalheimAuthState`)
+
+```cpp
+enum class ENidalheimAuthState : uint8
+{
+    Uninitialized,
+    NotAuthenticated,
+    Authenticating,    // Polling en cours
+    Authenticated,
+    Refreshing,        // Refresh silencieux en cours
+    Failed,
+};
+```
+
+`OnAuthStateChanged` broadcast à chaque transition — l'UI peut s'y binder pour afficher des écrans de loading / erreur.
+
+## API canonique pour appels réseau authentifiés
+
+**Toujours** passer par `EnsureFreshAccessToken` avant un appel HTTP/WS — il garantit que le token est valide (refresh transparent si nécessaire).
+
+```cpp
+AuthSubsystem->EnsureFreshAccessToken(FOnTokenReady::CreateLambda(
+    [this](bool bSuccess, const FString& AccessToken)
+    {
+        if (!bSuccess)
+        {
+            // Token expired and refresh failed → re-prompt user
+            return;
+        }
+        // Use AccessToken for HTTP/WS call
+        OpenWebSocketWithToken(AccessToken);
+    }));
+```
+
+> ⚠️ **Ne jamais** lire `GetAccessTokenRaw()` directement avant un appel réseau — il peut être expiré, le subsystem ne fait pas de refresh implicite à la lecture.
+
+## Cas d'usage typiques
+
+| Scénario | Appel à faire |
+|---|---|
+| Premier lancement du jeu | `StartDeviceAuthorization()` — flow complet |
+| Re-lancement avec tokens valides | Bootstrap automatique au `Initialize()`, pas d'appel UI nécessaire |
+| Joueur clique "Logout" | `LogoutAsync()` — `POST /logout` + clear storage |
+| Backend renvoie 401 | `EnsureFreshAccessToken` détecte expiry et refresh, retry l'appel |
+| Refresh token expiré (>7j) | État → `NotAuthenticated`, ré-afficher l'écran de login (`StartDeviceAuthorization`) |
+
+## Persistance
+
+`FNidalheimAuthStorage` sérialise dans le `Saved/` du jeu (pas dans `Content/`). Les tokens sont chiffrés au repos via les API platform (`FPlatformMisc::Encrypt` / `Decrypt` quand dispo, fallback en clair sinon).
+
+> Le refresh token est plus sensible que l'access token (TTL 7 jours, donne accès à un nouveau couple). Ne jamais l'exposer en `UPROPERTY` Blueprint — il transite uniquement via le subsystem.
+
+## Voir aussi
+
+- [Auth backend — Device flow](/docs/auth#device-flow-ue5) — endpoints et sécurité
+- [api-auth — Device Authorization Grant](/docs/services/api-auth#device-authorization-grant-rfc-8628)
+- [NPCCharacter](/docs/ue5/characters/npc) — utilise `EnsureFreshAccessToken` pour ouvrir les WebSockets

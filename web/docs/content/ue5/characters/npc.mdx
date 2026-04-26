@@ -1,0 +1,166 @@
+---
+title: NPCCharacter
+---
+
+# NPCCharacter
+
+Système des PNJ pilotés par IA. Deux classes complémentaires :
+
+- **`ANidalheimNPCCharacter`** — le "cerveau" : double WebSocket text+audio, identité backend, audio capture/playback
+- **`ANidalheimInGameNPC`** — l'instance posée en niveau : InteractionSphere qui déclenche le proximity chat
+
+## Hiérarchie
+
+```
+ACharacter (Unreal)
+└── ANidalheimCharacterBase           (GAS shared)
+    └── ANidalheimNPCCharacter        (cerveau, double WebSocket vers api-game)
+        └── ANidalheimInGameNPC       (instance posée en niveau, InteractionSphere)
+```
+
+## Multi-instance — refactor récent
+
+> ⚠️ Le pattern singleton `ANidalheimNPCCharacter::GetInstance()` a été supprimé. Chaque PNJ posé en niveau a sa propre identité backend.
+
+### Identité par PNJ
+
+```cpp
+// Source/Nidalheim/Character/NidalheimNPCCharacter.h
+UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "NPC")
+FString NpcId = TEXT("default");
+```
+
+Le `NpcId` matche la table `npcs` côté `api-game` (cf [Database](/docs/services/database)). Chaque entrée a son propre :
+- `system_prompt` — prompt LLM personnalisé
+- `voice_id` — voix Cartesia ou ElevenLabs
+- `llm_model` — modèle LLM par défaut
+
+L'historique conversationnel est scopé `(user_id, npc_id)` côté Postgres → switcher de PNJ ne mélange pas les conversations.
+
+### Construction de l'URL WebSocket
+
+```cpp
+wss://api-game.nidalheim.com/text?token=<JWT>&npc=<NpcId>
+wss://api-game.nidalheim.com/audio?token=<JWT>&npc=<NpcId>
+```
+
+`api-game` vérifie le JWT en HS256 avec le `JWT_SECRET` partagé (cf [Auth backend](/docs/auth#jwt-hs256)). Si `npc` est absent ou inconnu, fallback sur le seed `default` inclus dans la migration `0002_*`.
+
+```cpp
+// BuildWsUrl
+FString ANidalheimNPCCharacter::BuildWsUrl(
+    const FString& BaseUrl,
+    const FString& AccessToken,
+    const FString& NpcId)
+{
+    if (BaseUrl.IsEmpty() || AccessToken.IsEmpty()) return BaseUrl;
+    FString Url = BaseUrl;
+    {
+        const TCHAR Joiner = Url.Contains(TEXT("?")) ? TEXT('&') : TEXT('?');
+        Url = FString::Printf(TEXT("%s%ctoken=%s"), *Url, Joiner,
+                              *FGenericPlatformHttp::UrlEncode(AccessToken));
+    }
+    if (!NpcId.IsEmpty())
+    {
+        Url = FString::Printf(TEXT("%s&npc=%s"), *Url,
+                              *FGenericPlatformHttp::UrlEncode(NpcId));
+    }
+    return Url;
+}
+```
+
+### Switcher de PNJ runtime
+
+```cpp
+UFUNCTION(BlueprintCallable, Category = "NPC")
+void SetNpcId(const FString& NewNpcId);
+```
+
+Closes les deux WebSockets et reopens avec le nouveau `?npc=<id>`. No-op si `NewNpcId == NpcId`.
+
+## API exposée Blueprint
+
+```cpp
+// Send text message
+UFUNCTION(BlueprintCallable, Category = "NPC")
+void SendMessageToNPC(const FString& Message);
+
+// Audio (push-to-talk)
+UFUNCTION(BlueprintCallable, Category = "NPC|Audio")
+void StartAudioCapture();
+
+UFUNCTION(BlueprintCallable, Category = "NPC|Audio")
+void StopAudioCapture();
+
+UFUNCTION(BlueprintCallable, Category = "NPC|Audio")
+void CommitAudioBuffer();
+
+// Events
+UPROPERTY(BlueprintAssignable, Category = "NPC")
+FOnMessageReceivedSignature OnMessageReceivedDelegate;
+
+UPROPERTY(BlueprintAssignable, Category = "NPC")
+FOnUserTranscriptionSignature OnUserTranscriptionDelegate;
+```
+
+## Pipeline audio
+
+Détails dans [Voice pipeline](/docs/voice-pipeline) côté backend. Côté UE5 :
+
+1. **Capture** : `UNidalheimAudioCaptureComponent` ouvre un capture device au sample rate du système
+2. **Streaming** : envoi binaire frames PCM au WebSocket `/audio` (le client envoie un `audio_config` au début pour signaler le sample rate)
+3. **Commit** : `CommitAudioBuffer()` envoie un message texte `COMMIT` qui finalise l'utterance côté Deepgram
+4. **Playback** : les frames PCM TTS reçues sont écrites dans un `USoundWaveProcedural` lu par un `UAudioComponent`
+
+## Proximity chat (`ANidalheimInGameNPC`)
+
+Le pattern type pour un PNJ posé en niveau :
+
+```
+ANidalheimInGameNPC
+  ├── InteractionSphere (USphereComponent, rayon 500cm par défaut)
+  └── NpcId = "olaf"  (configuré en BP)
+
+Joueur entre dans la sphère
+  → ChatSubsystem->ShowChatWithNpc(NpcId)
+  → NPCCharacter->SetNpcId(NpcId) si différent
+  → ChatWidget visible
+
+Joueur sort
+  → ChatSubsystem->HideChat()
+```
+
+Le NPCCharacter sous-jacent reste connecté ; seule la visibilité de l'UI et l'identité backend changent.
+
+### Création d'un nouveau PNJ
+
+1. **Côté backend** : INSERT dans la table `npcs` côté `services/db` (migration ou seed) avec `id`, `system_prompt`, `voice_id`, `llm_model`
+2. **Côté UE5** : créer un BP qui hérite de `ANidalheimInGameNPC`, set `NpcId` au même identifiant, le poser dans le niveau
+3. Optionnel : ajuster `InteractionRadius` selon la taille de la zone d'interaction souhaitée
+
+## Lifecycle
+
+```
+BeginPlay
+  → AudioCaptureComponent setup (NewObject + RegisterComponent)
+  → ConnectTextWebSocket / ConnectAudioWebSocket
+       └─ AuthSubsystem->EnsureFreshAccessToken
+              └─ OpenTextSocketWithToken / OpenAudioSocketWithToken
+                     └─ BuildWsUrl + FWebSocketsModule::Get().CreateWebSocket
+
+EndPlay
+  → bShuttingDown = true
+  → StopAudioCapture
+  → Close WebSockets
+```
+
+## Reconnect logic
+
+En cas de disconnect côté serveur ou erreur réseau, `OnTextClosed`/`OnAudioClosed` appellent `RequestReconnect(bTextChannel)` qui retente une fois (`bTextReconnectAttempted` / `bAudioReconnectAttempted` flags). Si la reconnexion échoue, le PNJ reste muet jusqu'au prochain `BeginPlay`.
+
+## Voir aussi
+
+- [Authentification UE5](/docs/ue5/auth) — `EnsureFreshAccessToken` est utilisé avant chaque ouverture de WS
+- [Chat & UI](/docs/ue5/chat) — `ChatSubsystem` orchestre le NPCCharacter + ChatWidget
+- [Voice pipeline](/docs/voice-pipeline) — backend STT → LLM → TTS
+- [Database — table npcs](/docs/services/database) — schéma backend par PNJ

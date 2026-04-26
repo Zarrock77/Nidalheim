@@ -1,0 +1,91 @@
+---
+title: Conventions UE5
+---
+
+# Conventions UE5
+
+## Convention de dossiers `Content/Nidalheim/` — Lyra-style
+
+Réorganisation calquée sur le sample project officiel d'Epic. Organisation **par domaine**, pas par type d'asset.
+
+```
+Content/Nidalheim/
+├── Characters/
+│   ├── Heroes/                  Player character (mesh + skeleton + anims + materials + BP)
+│   └── NPCs/                    BP_InGameNPC_Base, BP_Olaf, BP_Sigrid…
+├── Game/                        GameModes + PlayerControllers (convention Lyra)
+│   ├── BP_NidalheimGameMode
+│   ├── BP_MenuGameMode
+│   ├── BP_NidalheimPlayerController
+│   └── PC_MainMenu
+├── Input/                       IA_*, IMC_*, Touch interface
+├── Interactables/               Door, JumpPad, Target — props interactifs
+├── Maps/                        MainLevel, MainMenuLevel
+├── System/                      Data, Enums, Interfaces communes (BPI_Interact)
+└── UI/                          Menus, HUD
+```
+
+### Pourquoi Lyra et pas full custom ?
+
+- **Reconnaissable** par tout dev UE5 expérimenté (signal pro)
+- **Scalable** — ajouter un nouveau domaine = un nouveau dossier de niveau 1
+- **Découplé** des classes UE : un `BP_NidalheimGameMode` (GameMode) et un `PC_MainMenu` (PlayerController) cohabitent dans `Game/` parce qu'ils participent au même domaine fonctionnel
+
+### Ce qu'on **n'adopte pas** de Lyra
+
+Convention de dossiers ✅ — mais pas les patterns archi lourds :
+
+| Pattern Lyra | Adopté ? | Pourquoi |
+|---|---|---|
+| `GameFeatures` plugins | ❌ | Overkill pour un projet de cette taille |
+| `ExperienceDefinitions` | ❌ | Pas de besoin de multi-experience |
+| `ModularGameplay` | ❌ | Composition manuelle suffit |
+| `CommonUI` | ❌ | Slate + UMG natifs OK |
+| Lyra Input wrapper | ❌ | Enhanced Input direct |
+
+## Naming C++
+
+| Élément | Convention | Exemple |
+|---|---|---|
+| Actor | `A` + Nom | `ANidalheimPlayerCharacter` |
+| UObject / Component | `U` + Nom | `UNidalheimChatSubsystem` |
+| Struct | `F` + Nom | `FNidalheimUser`, `FNidalheimTokens` |
+| Enum | `E` + Nom | `ENidalheimAuthState` |
+| Interface | `I` (impl) + `U` (decl) | `ICombatAttacker` + `UCombatAttacker` |
+| **Préfixe projet** | Toujours `Nidalheim` après le préfixe UE | `UNidalheimAuthSubsystem` |
+
+## Naming assets (Content/)
+
+| Type | Préfixe | Exemple |
+|---|---|---|
+| Blueprint | `BP_` | `BP_NidalheimGameMode`, `BP_PlayerCharacter` |
+| Anim Blueprint | `ABP_` | `ABP_PlayerCharacter` |
+| Widget Blueprint | `WBP_` | `WBP_MainMenu`, `WBP_SettingsMenu` |
+| Skeletal Mesh | `SK_` | `SK_NidalheimCharacter` |
+| Static Mesh | `SM_` | `SM_Cylinder` |
+| Material | `M_` | `M_Ch05_body` |
+| Material Instance | `MI_` | `MI_Ch05_body_red` |
+| Texture | `T_` + suffixe `_D/N/M/S/G` | `T_Ch05_1001_Diffuse` |
+| Input Action | `IA_` | `IA_Move`, `IA_Jump` |
+| Input Mapping Context | `IMC_` | `IMC_Default` |
+| Player Controller (BP) | `BP_` ou `PC_` (contextuel) | `BP_NidalheimPlayerController`, `PC_MainMenu` |
+| Physics Asset | `PHYS_` | `PHYS_NidalheimCharacter` |
+
+## Style C++
+
+- `#pragma once` en tête de chaque header (pas d'include guards)
+- PascalCase pour fonctions et membres
+- Macros UE pour exposition Blueprint : `UFUNCTION(BlueprintCallable, ...)` / `UPROPERTY(EditAnywhere, BlueprintReadOnly, ...)`
+- Pointeurs :
+  - `TObjectPtr<>` pour les propriétés `UObject` (UE 5.0+)
+  - `TSharedPtr` / `TWeakObjectPtr` selon contexte
+  - `TUniquePtr` pour les membres non-`UObject` (cf `AuthSubsystem::Client`/`Storage`)
+- Delegates :
+  - `DECLARE_DYNAMIC_MULTICAST_DELEGATE_*` pour les events Blueprint-exposés
+  - `DECLARE_DELEGATE_*` (non-dynamic) pour les callbacks C++ internes (`EnsureFreshAccessToken`, etc.)
+- Subsystem (Auth, Chat, AuthUI) = points d'entrée privilégiés pour les nouvelles features cross-cutting
+- C++ moderne : range-based for, `auto` quand l'intent est clair, const correctness
+
+## Layout source — Lyra-style
+
+`Source/Nidalheim/` suit la même philosophie que `Content/` : organisation par domaine (`Character/`, `AbilitySystem/`, `UI/`, `Auth/`, etc.), PascalCase, singulier. Détails dans [Aperçu — Source layout](/docs/ue5/overview#source-layout-sourcenidalheim).

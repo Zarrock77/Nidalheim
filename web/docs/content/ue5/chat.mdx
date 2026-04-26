@@ -1,0 +1,117 @@
+---
+title: Chat & UI
+---
+
+# Chat & UI
+
+L'UI de chat avec les PNJ est gérée par deux composants C++ couplés :
+
+- **`UNidalheimChatSubsystem`** — `ULocalPlayerSubsystem`, propriétaire unique du `NPCCharacter` et du `ChatWidget`
+- **`UNidalheimChatWidget`** — Widget Slate (pas UMG) — affichage des messages, input field
+
+## Architecture
+
+```
+ULocalPlayer (par-joueur, créé au démarrage)
+  └── UNidalheimChatSubsystem (lifecycle calqué sur ULocalPlayer)
+       ├── ANidalheimNPCCharacter*  (référence forte)
+       └── UNidalheimChatWidget*    (référence forte)
+```
+
+> Le `ChatSubsystem` est le **propriétaire unique** du NPCCharacter et du ChatWidget. Ne jamais spawner de NPCCharacter ni de ChatWidget depuis le PlayerController ou ailleurs — toujours passer par le subsystem.
+
+## API Blueprint
+
+```cpp
+// Chat lifecycle
+UFUNCTION(BlueprintCallable, Category = "Chat")
+void ShowChat();
+
+UFUNCTION(BlueprintCallable, Category = "Chat")
+void ShowChatWithNpc(const FString& NpcId);
+
+UFUNCTION(BlueprintCallable, Category = "Chat")
+void HideChat();
+
+// Audio (proxy vers NPCCharacter — pratique pour les BP qui ne connaissent que le subsystem)
+UFUNCTION(BlueprintCallable, Category = "Chat")
+void StartAudioCapture();
+
+UFUNCTION(BlueprintCallable, Category = "Chat")
+void StopAudioCapture();
+
+UFUNCTION(BlueprintCallable, Category = "Chat")
+void CommitAudioBuffer();
+```
+
+## Flow proximity chat
+
+```
+ANidalheimInGameNPC (sphère d'interaction)
+  └─ Joueur entre dans la sphère
+       └─ ChatSubsystem->ShowChatWithNpc(NpcId)
+            ├─ NPCCharacter->SetNpcId(NpcId) si différent (reconnect WebSockets)
+            └─ ChatWidget->SetVisibility(Visible)
+
+  └─ Joueur sort de la sphère
+       └─ ChatSubsystem->HideChat()
+            └─ ChatWidget->SetVisibility(Hidden)
+```
+
+## Push-to-talk
+
+```
+PlayerController (touche P)
+  → UNidalheimChatSubsystem::StartAudioCapture
+       → ANidalheimNPCCharacter::StartAudioCapture
+            → AudioCaptureComponent capture device
+
+(joueur relâche P)
+  → UNidalheimChatSubsystem::CommitAudioBuffer
+       → ANidalheimNPCCharacter::CommitAudioBuffer
+            → WebSocket /audio reçoit le COMMIT, finalise l'utterance Deepgram
+```
+
+## Setup au démarrage
+
+> ⚠️ **Refactor récent** : la dépendance à `UNidalheimAuthSubsystem` (binding `OnAuthStateChanged`) a été supprimée. Le chat est setup unconditionellement au début du jeu — c'est le `NPCCharacter` lui-même qui gère son auth via `EnsureFreshAccessToken` au moment d'ouvrir les sockets.
+
+```cpp
+// Source/Nidalheim/UI/NidalheimChatSubsystem.cpp
+void UNidalheimChatSubsystem::OnWorldBeginPlay()
+{
+    if (ULocalPlayer* LP = GetLocalPlayer())
+    {
+        if (UWorld* World = LP->GetWorld())
+        {
+            if (World->bIsTearingDown || !World->IsGameWorld())
+            {
+                World->GetTimerManager().SetTimerForNextTick(/* retry */);
+                return;
+            }
+            SetupChat(World);
+        }
+    }
+}
+```
+
+`SetupChat` :
+1. Spawn le `NPCCharacter` (singleton de fait, mais owned par le subsystem)
+2. Crée le `ChatWidget` (`SNew<SNidalheimChatWidget>`)
+3. Bind les delegates `OnNPCMessageReceived`, `OnUserTranscription` du NPCCharacter sur les handlers du subsystem qui les forwardent au widget
+4. Hide le widget par défaut (ne s'affiche qu'au proximity chat)
+
+## Slate vs UMG — pourquoi Slate ?
+
+`UNidalheimChatWidget` est un widget **Slate** (pas UMG). Choix historique :
+- Contrôle fin du layout (chat en overlay, scroll, focus management)
+- Pas de réflexion UPROPERTY pour les composants internes
+- Plus léger que UMG pour une UI principalement défilante
+
+Les autres UI du projet (menus, settings) restent en UMG (`Content/Nidalheim/UI/`) car elles bénéficient de l'éditeur visuel.
+
+## Voir aussi
+
+- [NPCCharacter](/docs/ue5/characters/npc) — le "cerveau" backend du chat
+- [Voice pipeline](/docs/voice-pipeline) — pipeline STT/LLM/TTS côté backend
+- [Conventions UE5](/docs/ue5/conventions) — naming widgets (`WBP_*`, `S*` pour Slate)

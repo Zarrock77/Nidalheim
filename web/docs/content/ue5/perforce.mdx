@@ -1,0 +1,150 @@
+---
+title: Workflow Perforce
+---
+
+# Workflow Perforce
+
+Le client UE5 est versionné sous **Perforce**, pas Git. Les `.uasset` (Blueprints, meshes, materials) sont binaires → Perforce gère naturellement les locks, ce qui évite des conflits de merge ingérables sur les BP.
+
+## Hébergement
+
+| | |
+|---|---|
+| **Depot** | `main` |
+| **Serveur** | VPS Epitech (déployé via le stack Docker `infra/p4d/` du repo backend, lifecycle séparé du reste du backend) |
+| **Stream** dev local | `JJ_main` (configurable — c'est le nom du workspace côté client P4) |
+| **Chemin local par défaut** | `C:\Users\jj\Perforce\JJ_main\` |
+
+Le `JJ_main` est juste le nom du stream/workspace côté client — chaque dev peut le nommer comme il veut. Le depot lui-même reste `main` côté serveur.
+
+## Commandes essentielles
+
+```bash
+p4 edit <file>              # check out avant toute modif (fichiers RO par défaut)
+p4 add <file>               # marquer un nouveau fichier pour add
+p4 delete <file>            # marquer un fichier pour delete
+p4 revert <file>            # annuler une modif locale (avant submit)
+p4 opened                   # voir tout ce qui est en pending
+p4 change                   # créer un changelist nommé (ouvre l'éditeur)
+p4 reopen -c <CL> <files>   # déplacer des fichiers entre changelists
+p4 submit -c <CL>           # commit + push (Perforce n'a pas de push séparé)
+p4 sync                     # pull les changes des autres
+p4 resolve -am <file>       # auto-merge en cas de conflit
+```
+
+## Files RO par défaut
+
+Tous les fichiers sont en read-only sur le disque tant qu'ils ne sont pas check out. Edit direct sans `p4 edit` → l'OS bloque l'écriture.
+
+```bash
+# ❌ Tentative d'edit sans check out → erreur "Permission denied"
+vim Source/Nidalheim/Character/NidalheimPlayerCharacter.cpp
+
+# ✅ Check out d'abord
+p4 edit Source/Nidalheim/Character/NidalheimPlayerCharacter.cpp
+vim Source/Nidalheim/Character/NidalheimPlayerCharacter.cpp
+```
+
+## UE Editor + Perforce
+
+Si l'intégration Perforce est activée dans `Project Settings > Source Control` :
+
+| Action UE Editor | Effet Perforce |
+|---|---|
+| Édition d'un asset dans UE | `p4 edit <file>` automatique au save |
+| `Right-click > Move To…` ou `Rename` | `p4 move` (préserve l'historique de l'asset) |
+| `Right-click > Delete` | `p4 delete` (marqué dans default changelist) |
+| Sauvegarde du level | `p4 edit` sur le `.umap` + tous les `__ExternalActors__` modifiés |
+
+> ⚠️ **Ne JAMAIS** déplacer un `.uasset` via Windows Explorer — UE et P4 perdent les références. Toujours passer par UE Editor (Move To…) ou P4V.
+
+## Submitting
+
+`Ctrl+Shift+S` ou `File > Submit to Source Control` dans UE Editor :
+- Liste tous les fichiers en pending
+- Demande un message de commit
+- Submit la default changelist
+
+Côté CLI :
+```bash
+# Voir ce qui pend
+p4 opened
+
+# Créer un changelist nommé (ouvre $EDITOR)
+p4 change
+
+# Move des fichiers spécifiques dans CL
+p4 reopen -c 42 Source/Nidalheim/Character/NidalheimPlayerCharacter.h \
+                Source/Nidalheim/Character/NidalheimPlayerCharacter.cpp
+
+# Submit le CL
+p4 submit -c 42
+```
+
+## Resolve de conflits
+
+Un conflit arrive quand quelqu'un d'autre a submit la même file pendant que tu l'avais en edit local.
+
+```bash
+p4 submit -c 42
+# → "must resolve //path/to/file before submit"
+
+p4 resolve -am //path/to/file       # auto-merge (safe pour text files)
+p4 submit -c 42                     # retry
+```
+
+Pour les `.uasset` (binaires), le merge auto échoue presque toujours. Stratégie :
+- **Si tes changes sont mineurs** : `p4 resolve -ay <file>` (accept yours), puis re-faire les modifs de l'autre par-dessus
+- **Si les changes de l'autre sont mineurs** : `p4 resolve -at <file>` (accept theirs), puis re-faire tes modifs
+- **Sinon** : ouvrir l'asset, refaire le merge à la main dans UE
+
+> 💡 La meilleure parade aux conflits binaires = check out tôt, lock implicite, submit petit et souvent.
+
+## Workflow en plusieurs changelists
+
+Pour un travail qui touche plusieurs domaines (ex: code C++ + assets), créer plusieurs changelists logiques au lieu d'un gros submit unique :
+
+```bash
+# CL pour le refactor C++
+p4 change   # → CL 50, description "refactor(player): move input to BP"
+p4 reopen -c 50 Source/Nidalheim/Character/NidalheimPlayerCharacter.{h,cpp}
+p4 submit -c 50
+
+# CL pour les assets BP
+p4 change   # → CL 51, description "feat(content): wire Enhanced Input in BP_PlayerCharacter"
+p4 reopen -c 51 Content/Nidalheim/Characters/Heroes/BP_PlayerCharacter.uasset
+p4 submit -c 51
+```
+
+Avantages :
+- Historique propre (un CL = un changement logique)
+- Rollback ciblé si besoin (`p4 unsubmit -c <CL>`)
+- Code review plus facile (les diffs sont scopés)
+
+## Files générés à NE JAMAIS committer
+
+Le `.p4ignore` doit lister :
+```
+Binaries/
+Intermediate/
+DerivedDataCache/
+Saved/
+*.suo
+*.user
+.vs/
+```
+
+Ces dossiers sont régénérés à chaque build/run. Les committer pollue inutilement la depot.
+
+## Mannequin assets supprimés
+
+> 📌 **Cleanup récent (CL63)** : tous les assets `Content/Nidalheim/Characters/Mannequins/` du template UE5 (Manny + Quinn + 130 anims) ont été supprimés — non utilisés en prod, le `Characters/Heroes/` a son propre `SK_NidalheimCharacter`.
+>
+> **Cleanup récent (CL64)** : `Content/StarterContent/` (Epic starter content : M_Metal_*, P_Fire, T_Fire_SubUV, etc.) supprimé — aucune référence dans les Maps/ ni Source/.
+
+Si tu vois encore ces dossiers localement après un `p4 sync`, c'est qu'un fichier était locked par UE Editor au moment du submit — relance UE Editor fermé puis `p4 sync -f` pour forcer.
+
+## Voir aussi
+
+- [Aperçu — Source layout](/docs/ue5/overview)
+- Documentation officielle Perforce : [perforce.com/manuals/p4guide](https://www.perforce.com/manuals/p4guide/)

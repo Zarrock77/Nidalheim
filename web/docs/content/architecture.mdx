@@ -122,3 +122,9 @@ La clé `JWT_SECRET` est partagée entre `api-auth` et `api-game` via `infra/.en
 | **Groq** (vs OpenAI) pour le LLM | Llama 70B à 10x la vitesse d'OpenAI, coût < 0.1$/M tokens |
 | **Cartesia** (vs ElevenLabs) TTS par défaut | Latency first-chunk < 400ms, connexion WS persistante → pas de handshake par tour |
 | **Registry-based deploy** (vs build-on-VPS) | Build parallèle sur GH runners, rollback par SHA, pas de charge CPU pendant le deploy |
+| Convention **Lyra-style** côté UE5 | Reconnaissable par tout dev UE5, scalable par domaine fonctionnel — sans adopter les patterns lourds (GameFeatures, ExperienceDefinitions). Détails [Client UE5 → Conventions](/docs/ue5/conventions) |
+| **Multi-instance NPC** (UE5) | Chaque PNJ posé en niveau a son propre `NpcId` + identité backend (system_prompt, voice, conversation history scopée `(user_id, npc_id)`). Remplace le pattern singleton initial — détails [NPCCharacter](/docs/ue5/characters/npc) |
+
+## Client UE5
+
+Le client jeu vit dans un **depot Perforce séparé** (`main`, hébergé sur le VPS Epitech via `infra/p4d/`). Il consomme `api-auth` (Device Authorization Grant) et `api-game` (WebSocket text + audio). Voir la section [Client UE5](/docs/ue5/overview) pour le source layout, les conventions Lyra adoptées, le système PNJ multi-instance et le flow d'auth côté C++.
