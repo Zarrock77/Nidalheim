@@ -1,0 +1,94 @@
+---
+title: Aperçu
+---
+
+# Backend — Aperçu
+
+Monorepo backend de **Nidalheim**. Cinq services Docker derrière un nginx reverse-proxy, déployés sur un VPS via une CI registry-based (GitHub Actions → GHCR → SSH). Auth JWT HS256 partagée, API WebSocket temps-réel pour les PNJ pilotés par IA, deux frontends Next.js (vitrine publique + docs interne admin-only), Postgres + Redis pour la persistance.
+
+## Layout du repo
+
+```
+backend/
+├── services/
+│   ├── api-auth/      # Express 5 — REST auth (register, login, refresh, device flow)
+│   ├── api-game/      # ws — WebSocket /text et /audio pour les PNJ IA
+│   ├── db/            # Drizzle ORM — schéma + migrations Postgres
+│   ├── site/          # Next.js 16 — vitrine publique (www.nidalheim.com)
+│   └── docs/          # Nextra 4 — cette doc (admin-only, docs.nidalheim.com)
+└── infra/
+    ├── docker-compose.yml
+    ├── nginx/                # reverse proxy + TLS direct api-game
+    ├── init-letsencrypt.sh   # bootstrap Let's Encrypt (1× sur le VPS)
+    ├── p4d/                  # serveur Perforce — stack Docker séparé
+    └── .env.example
+```
+
+Pas de workspace racine — chaque service installe ses deps localement (mix `pnpm` / `npm`). Détails dans [Conventions / Package managers](/docs/backend/conventions#package-managers).
+
+## Carte des services
+
+| Service | Stack | Port (interne) | Rôle |
+|---------|-------|----------------|------|
+| `api-auth` | Express 5 + TS + npm | `3001` | Auth REST. Register, login, refresh, logout. Device Authorization Grant pour le client UE5. |
+| `api-game` | `ws` + JS ESM + pnpm | `3002` | WebSocket `/text` (chat LLM) et `/audio` (voice streaming Deepgram → Groq → Cartesia). |
+| `db` | Drizzle + tsx + pnpm | — | Schéma Postgres + migrations. Container one-shot, pas de runtime. |
+| `site` | Next.js 16 + pnpm | `3000` | Site vitrine, register/login UI, page `/device` du Device flow. |
+| `docs` | Nextra 4 + NextAuth + pnpm | `3000` | Documentation interne admin-only (callback `role === "admin"`). |
+
+Plus deux services d'infra : **Postgres 16** (users, profiles, chat history, npcs) et **Redis 7** (refresh tokens avec rotation, état Device flow).
+
+## Flux principaux (vue 30 000 ft)
+
+```
+                 ┌──────────────┐  REST /register, /login, /refresh
+   web/site  ───▶│   api-auth   │  Device flow: /device/{authorize,approve,token}
+   web/docs  ───▶│   (JWT mint) │
+                 └──────┬───────┘
+                        │  postgres + redis (refresh tokens)
+                        ▼
+
+                 ┌──────────────┐  WS /text?token=&npc=
+   UE5 client ──▶│   api-game   │  WS /audio?token=&npc=
+                 │  (JWT verify)│
+                 └──────┬───────┘
+                        │
+        ┌───────────────┼─────────────────┐
+        ▼               ▼                 ▼
+  ┌──────────┐   ┌────────────┐   ┌──────────────┐
+  │ Postgres │   │  Deepgram  │   │ Groq + TTS   │
+  │ (history)│   │   (STT)    │   │ (LLM + voice)│
+  └──────────┘   └────────────┘   └──────────────┘
+```
+
+JWT **HS256** avec `JWT_SECRET` partagé entre `api-auth` (mint) et `api-game` (verify) via `infra/.env`. Pas de JWKS, pas de RS256 — le secret symétrique suffit pour deux services contrôlés en interne. Détails dans [Authentification](/docs/backend/auth).
+
+## Infra & déploiement
+
+- **Domaines prod** : `www`, `docs`, `api-auth` passent par Cloudflare proxy (TLS Cloudflare → origin HTTP/80). `api-game` est en DNS-only avec **TLS direct VPS via Let's Encrypt** pour bypass le cap WebSocket de Cloudflare free.
+- **CI/CD** : push sur `main` → build matriciel des 5 images vers `ghcr.io/zarrock77/nidalheim-<service>:{sha,latest}` → SSH VPS → `docker compose pull && up -d`. Voir [Déploiement](/docs/backend/deploy).
+- **Renouvellement cert** : service `certbot` du compose tourne `certbot renew` toutes les 12h, nginx reload toutes les 6h. Bootstrap initial unique via `infra/init-letsencrypt.sh`.
+
+## Stack en un coup d'œil
+
+| Couche | Technologies |
+|--------|--------------|
+| Runtime | Node.js 22, TypeScript (auth, db, site, docs), JS ESM (game) |
+| Backend | Express 5, `ws`, `pg`, `ioredis`, `bcrypt` |
+| Frontend | Next.js 16 App Router, React 19, Tailwind 4, Nextra 4, NextAuth 5 |
+| DB | PostgreSQL 16 + Drizzle ORM, Redis 7 |
+| IA | Groq (Llama 3.1 8B / 3.3 70B), Deepgram STT, Cartesia TTS, ElevenLabs TTS (fallback) |
+| Infra | Docker Compose, Nginx, Let's Encrypt + Certbot, GitHub Actions, GHCR |
+
+## Par où commencer
+
+| Tu veux… | Va lire |
+|----------|---------|
+| Faire tourner ça en local | [Installation locale](/docs/backend/setup-project) |
+| Comprendre les flux et décisions techniques | [Architecture](/docs/backend/architecture) |
+| Voir les routes REST / endpoints WS détaillés | [Services](/docs/backend/services) |
+| Comprendre le flow d'auth (HS256 + Device flow) | [Authentification](/docs/backend/auth) |
+| Toucher au pipeline voice (STT/LLM/TTS) | [Voice pipeline](/docs/backend/voice-pipeline) |
+| Comprendre la CI/CD et le TLS | [Déploiement](/docs/backend/deploy) |
+| Style de code, commits, pattern préférés | [Conventions](/docs/backend/conventions) |
+| Bosser côté client jeu | [Unreal Engine — Aperçu](/docs/unreal-engine/overview) |

@@ -1,4 +1,5 @@
 export default {
+  overview: "Aperçu",
   "setup-project": "Installation locale",
   architecture: "Architecture",
   services: "Services",
