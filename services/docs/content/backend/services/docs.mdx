@@ -79,21 +79,34 @@ Pour activer en prod :
 
 ```
 services/docs/content/
-├── _meta.ts                  # ordre de nav au niveau racine
-├── index.mdx                 → /docs
-├── setup-project.mdx         → /docs/setup-project
-├── architecture.mdx          → /docs/architecture
-├── services/
-│   ├── _meta.ts              # ordre de nav du sous-dossier
-│   ├── api-auth.mdx          → /docs/services/api-auth
-│   ├── api-game.mdx          → /docs/services/api-game
-│   ├── database.mdx          → /docs/services/database
-│   ├── site.mdx              → /docs/services/site
-│   └── docs.mdx              → /docs/services/docs
-├── auth.mdx                  → /docs/auth
-├── voice-pipeline.mdx        → /docs/voice-pipeline
-├── deploy.mdx                → /docs/deploy
-└── conventions.mdx           → /docs/conventions
+├── _meta.ts                          # nav root : { index, backend, "unreal-engine" }
+├── index.mdx                         → /docs
+├── backend/
+│   ├── _meta.ts                      # nav backend
+│   ├── setup-project.mdx             → /docs/backend/setup-project
+│   ├── architecture.mdx              → /docs/backend/architecture
+│   ├── services/
+│   │   ├── _meta.ts                  # nav services
+│   │   ├── api-auth.mdx              → /docs/backend/services/api-auth
+│   │   ├── api-game.mdx              → /docs/backend/services/api-game
+│   │   ├── database.mdx              → /docs/backend/services/database
+│   │   ├── site.mdx                  → /docs/backend/services/site
+│   │   └── docs.mdx                  → /docs/backend/services/docs
+│   ├── auth.mdx                      → /docs/backend/auth
+│   ├── voice-pipeline.mdx            → /docs/backend/voice-pipeline
+│   ├── deploy.mdx                    → /docs/backend/deploy
+│   └── conventions.mdx               → /docs/backend/conventions
+└── unreal-engine/
+    ├── _meta.ts                      # nav unreal-engine
+    ├── overview.mdx                  → /docs/unreal-engine/overview
+    ├── conventions.mdx               → /docs/unreal-engine/conventions
+    ├── auth.mdx                      → /docs/unreal-engine/auth
+    ├── characters/
+    │   ├── _meta.ts                  # nav characters
+    │   ├── player.mdx                → /docs/unreal-engine/characters/player
+    │   └── npc.mdx                   → /docs/unreal-engine/characters/npc
+    ├── chat.mdx                      → /docs/unreal-engine/chat
+    └── perforce.mdx                  → /docs/unreal-engine/perforce
 ```
 
 ## Dev

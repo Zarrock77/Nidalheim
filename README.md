@@ -102,7 +102,7 @@ cd services/docs      && pnpm install && pnpm dev       # :3000 (ou premier port
 | `api-auth.nidalheim.com` | API Auth (REST) | Cloudflare (proxied) |
 | `api-game.nidalheim.com` | API Game (WebSocket) | **VPS direct (Let's Encrypt)** |
 
-`api-game` bypass volontairement Cloudflare (DNS-only) pour éviter le cap WebSocket free. Cert auto-renouvelé par le service `certbot` du compose, bootstrap initial via `infra/init-letsencrypt.sh`. Détails : [docs/deploy](https://docs.nidalheim.com/docs/deploy#reverse-proxy-nginx).
+`api-game` bypass volontairement Cloudflare (DNS-only) pour éviter le cap WebSocket free. Cert auto-renouvelé par le service `certbot` du compose, bootstrap initial via `infra/init-letsencrypt.sh`. Détails : [docs/deploy](https://docs.nidalheim.com/docs/backend/deploy#reverse-proxy-nginx).
 
 ## CI/CD
 

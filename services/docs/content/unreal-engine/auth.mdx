@@ -4,7 +4,7 @@ title: Authentification (UE5)
 
 # Authentification — côté client UE5
 
-Le flow Device Authorization Grant (RFC 8628) côté serveur est documenté dans [Authentification → Device flow (UE5)](/docs/auth#device-flow-ue5). Cette page couvre l'implémentation côté client.
+Le flow Device Authorization Grant (RFC 8628) côté serveur est documenté dans [Authentification → Device flow (UE5)](/docs/backend/auth#device-flow-ue5). Cette page couvre l'implémentation côté client.
 
 ## Vue d'ensemble
 
@@ -143,6 +143,6 @@ AuthSubsystem->EnsureFreshAccessToken(FOnTokenReady::CreateLambda(
 
 ## Voir aussi
 
-- [Auth backend — Device flow](/docs/auth#device-flow-ue5) — endpoints et sécurité
-- [api-auth — Device Authorization Grant](/docs/services/api-auth#device-authorization-grant-rfc-8628)
-- [NPCCharacter](/docs/ue5/characters/npc) — utilise `EnsureFreshAccessToken` pour ouvrir les WebSockets
+- [Auth backend — Device flow](/docs/backend/auth#device-flow-ue5) — endpoints et sécurité
+- [api-auth — Device Authorization Grant](/docs/backend/services/api-auth#device-authorization-grant-rfc-8628)
+- [NPCCharacter](/docs/unreal-engine/characters/npc) — utilise `EnsureFreshAccessToken` pour ouvrir les WebSockets

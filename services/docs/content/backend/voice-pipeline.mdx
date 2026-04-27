@@ -136,7 +136,7 @@ Les erreurs **ne coupent pas** la connexion — le pipeline peut retenter à l'u
 
 Le contexte LLM est hydraté avec les 20 derniers tours (table `chat_messages`, ordre chronologique). Les tours user+assistant sont insérés **en transaction** après chaque `onComplete` du LLM pour éviter un état desynchronisé en cas de crash.
 
-Le même historique est partagé avec l'endpoint `/text` — un utilisateur qui switch text ↔ voice retrouve son fil. Schéma de la table dans [Services / Database](/docs/services/database#chat_messages).
+Le même historique est partagé avec l'endpoint `/text` — un utilisateur qui switch text ↔ voice retrouve son fil. Schéma de la table dans [Services / Database](/docs/backend/services/database#chat_messages).
 
 ## Debug
 

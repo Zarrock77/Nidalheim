@@ -4,10 +4,10 @@ title: Aperçu
 
 # Client UE5 — Aperçu
 
-Le client jeu Unreal Engine 5.6 (`Nidalheim.uproject`) vit dans un **depot Perforce séparé** du monorepo backend. Le depot s'appelle `main` et est hébergé sur le VPS Epitech (cf [Workflow Perforce](/docs/ue5/perforce)). Côté dev local, le stream/workspace s'appelle `JJ_main` (chemin par défaut `C:\Users\jj\Perforce\JJ_main\`). Il consomme les services backend documentés dans le reste de cette doc :
+Le client jeu Unreal Engine 5.6 (`Nidalheim.uproject`) vit dans un **depot Perforce séparé** du monorepo backend. Le depot s'appelle `main` et est hébergé sur le VPS Epitech (cf [Workflow Perforce](/docs/unreal-engine/perforce)). Côté dev local, le stream/workspace s'appelle `JJ_main` (chemin par défaut `C:\Users\jj\Perforce\JJ_main\`). Il consomme les services backend documentés dans le reste de cette doc :
 
-- **`api-auth`** via REST + Device Authorization Grant pour l'auth joueur ([détails](/docs/ue5/auth))
-- **`api-game`** via WebSocket `/text` et `/audio` pour les PNJ pilotés par IA ([voice pipeline](/docs/voice-pipeline))
+- **`api-auth`** via REST + Device Authorization Grant pour l'auth joueur ([détails](/docs/unreal-engine/auth))
+- **`api-game`** via WebSocket `/text` et `/audio` pour les PNJ pilotés par IA ([voice pipeline](/docs/backend/voice-pipeline))
 
 ## Source layout (`Source/Nidalheim/`)
 
@@ -51,7 +51,7 @@ Source/Nidalheim/
 
 > Le dossier `TP_ThirdPerson/` (template UE5) coexiste mais n'est **pas** la logique de prod. À supprimer dès que possible.
 
-Détails sur l'organisation `Content/` et le naming dans [Conventions](/docs/ue5/conventions).
+Détails sur l'organisation `Content/` et le naming dans [Conventions](/docs/unreal-engine/conventions).
 
 ## Build.cs — modules
 
@@ -73,7 +73,7 @@ WebsocketAudioBaseUrl="wss://api-game.nidalheim.com/audio"
 AudioCaptureVolume=0.1
 ```
 
-Pour pointer vers un backend local (cf [Setup](/docs/setup-project)) : remplacer par `http://localhost:3001` / `ws://localhost:3002/text` etc.
+Pour pointer vers un backend local (cf [Setup](/docs/backend/setup-project)) : remplacer par `http://localhost:3001` / `ws://localhost:3002/text` etc.
 
 ## Coordination cross-repo backend ↔ UE5
 
@@ -89,9 +89,9 @@ Toute modification de protocole doit être appliquée des **deux côtés** :
 
 ## Liens internes
 
-- [Conventions UE5](/docs/ue5/conventions) — Lyra + naming Epic
-- [Authentification](/docs/ue5/auth) — Device flow client
-- [PlayerCharacter](/docs/ue5/characters/player) — input BP + GAS
-- [NPCCharacter](/docs/ue5/characters/npc) — multi-instance + proximity
-- [Chat & UI](/docs/ue5/chat) — ChatSubsystem + Widget
-- [Workflow Perforce](/docs/ue5/perforce)
+- [Conventions UE5](/docs/unreal-engine/conventions) — Lyra + naming Epic
+- [Authentification](/docs/unreal-engine/auth) — Device flow client
+- [PlayerCharacter](/docs/unreal-engine/characters/player) — input BP + GAS
+- [NPCCharacter](/docs/unreal-engine/characters/npc) — multi-instance + proximity
+- [Chat & UI](/docs/unreal-engine/chat) — ChatSubsystem + Widget
+- [Workflow Perforce](/docs/unreal-engine/perforce)

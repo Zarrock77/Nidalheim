@@ -30,7 +30,7 @@ UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "NPC")
 FString NpcId = TEXT("default");
 ```
 
-Le `NpcId` matche la table `npcs` côté `api-game` (cf [Database](/docs/services/database)). Chaque entrée a son propre :
+Le `NpcId` matche la table `npcs` côté `api-game` (cf [Database](/docs/backend/services/database)). Chaque entrée a son propre :
 - `system_prompt` — prompt LLM personnalisé
 - `voice_id` — voix Cartesia ou ElevenLabs
 - `llm_model` — modèle LLM par défaut
@@ -44,7 +44,7 @@ wss://api-game.nidalheim.com/text?token=<JWT>&npc=<NpcId>
 wss://api-game.nidalheim.com/audio?token=<JWT>&npc=<NpcId>
 ```
 
-`api-game` vérifie le JWT en HS256 avec le `JWT_SECRET` partagé (cf [Auth backend](/docs/auth#jwt-hs256)). Si `npc` est absent ou inconnu, fallback sur le seed `default` inclus dans la migration `0002_*`.
+`api-game` vérifie le JWT en HS256 avec le `JWT_SECRET` partagé (cf [Auth backend](/docs/backend/auth#jwt-hs256)). Si `npc` est absent ou inconnu, fallback sur le seed `default` inclus dans la migration `0002_*`.
 
 ```cpp
 // BuildWsUrl
@@ -105,7 +105,7 @@ FOnUserTranscriptionSignature OnUserTranscriptionDelegate;
 
 ## Pipeline audio
 
-Détails dans [Voice pipeline](/docs/voice-pipeline) côté backend. Côté UE5 :
+Détails dans [Voice pipeline](/docs/backend/voice-pipeline) côté backend. Côté UE5 :
 
 1. **Capture** : `UNidalheimAudioCaptureComponent` ouvre un capture device au sample rate du système
 2. **Streaming** : envoi binaire frames PCM au WebSocket `/audio` (le client envoie un `audio_config` au début pour signaler le sample rate)
@@ -160,7 +160,7 @@ En cas de disconnect côté serveur ou erreur réseau, `OnTextClosed`/`OnAudioCl
 
 ## Voir aussi
 
-- [Authentification UE5](/docs/ue5/auth) — `EnsureFreshAccessToken` est utilisé avant chaque ouverture de WS
-- [Chat & UI](/docs/ue5/chat) — `ChatSubsystem` orchestre le NPCCharacter + ChatWidget
-- [Voice pipeline](/docs/voice-pipeline) — backend STT → LLM → TTS
-- [Database — table npcs](/docs/services/database) — schéma backend par PNJ
+- [Authentification UE5](/docs/unreal-engine/auth) — `EnsureFreshAccessToken` est utilisé avant chaque ouverture de WS
+- [Chat & UI](/docs/unreal-engine/chat) — `ChatSubsystem` orchestre le NPCCharacter + ChatWidget
+- [Voice pipeline](/docs/backend/voice-pipeline) — backend STT → LLM → TTS
+- [Database — table npcs](/docs/backend/services/database) — schéma backend par PNJ

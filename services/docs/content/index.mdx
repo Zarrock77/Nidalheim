@@ -4,18 +4,32 @@ title: Documentation Nidalheim
 
 # Nidalheim — Documentation interne
 
-Bienvenue sur la documentation backend de **Nidalheim**, le jeu UE5 dark fantasy nordique.
+Bienvenue sur la documentation de **Nidalheim**, le jeu UE5 dark fantasy nordique.
 Cette doc est réservée aux développeurs et admins du projet.
 
-## Que trouver ici
+## 📦 Backend
 
-- **[Installation locale](/docs/setup-project)** — prérequis, clone, env, migrations, lancement des services.
-- **[Architecture](/docs/architecture)** — vue d'ensemble du monorepo, des services et des flux de données.
-- **[Services](/docs/services)** — détail par service : routes REST, endpoints WebSocket, schéma DB.
-- **[Authentification](/docs/auth)** — flow complet JWT HS256 (register, login, refresh, logout).
-- **[Voice pipeline](/docs/voice-pipeline)** — Deepgram STT → Groq LLM → Cartesia TTS en streaming.
-- **[Déploiement](/docs/deploy)** — CI/CD registry-based, GHCR, VPS.
-- **[Conventions](/docs/conventions)** — style de code, commits, arborescence.
+Monorepo backend (auth REST, API WebSocket IA, frontends Next.js, infra Docker).
+
+- **[Installation locale](/docs/backend/setup-project)** — prérequis, clone, env, migrations, lancement des services.
+- **[Architecture](/docs/backend/architecture)** — vue d'ensemble du monorepo, des services et des flux de données.
+- **[Services](/docs/backend/services)** — détail par service : routes REST, endpoints WebSocket, schéma DB.
+- **[Authentification](/docs/backend/auth)** — flow complet JWT HS256 (register, login, refresh, logout, Device flow).
+- **[Voice pipeline](/docs/backend/voice-pipeline)** — Deepgram STT → Groq LLM → Cartesia TTS en streaming.
+- **[Déploiement](/docs/backend/deploy)** — CI/CD registry-based, GHCR, VPS, Let's Encrypt.
+- **[Conventions](/docs/backend/conventions)** — style de code, commits, arborescence.
+
+## 🎮 Unreal Engine
+
+Client jeu UE5 (depot Perforce séparé). Source layout, conventions Lyra-style, intégration backend.
+
+- **[Aperçu](/docs/unreal-engine/overview)** — source layout, modules, config `[Nidalheim]`.
+- **[Conventions](/docs/unreal-engine/conventions)** — naming Epic + préfixe `Nidalheim`, organisation `Content/`.
+- **[Authentification](/docs/unreal-engine/auth)** — Device Authorization Grant côté client + `EnsureFreshAccessToken`.
+- **[PlayerCharacter](/docs/unreal-engine/characters/player)** — input BP + Gameplay Ability System.
+- **[NPCCharacter](/docs/unreal-engine/characters/npc)** — multi-instance, proximity, WS text + audio.
+- **[Chat & UI](/docs/unreal-engine/chat)** — `ChatSubsystem` + Slate widget.
+- **[Workflow Perforce](/docs/unreal-engine/perforce)** — checkout, submit, branches.
 
 ## Stack en un coup d'œil
 
@@ -25,11 +39,14 @@ Cette doc est réservée aux développeurs et admins du projet.
 | Frontend | Next.js 16, React 19, Tailwind 4, Nextra 4 |
 | DB | PostgreSQL 16 (Drizzle ORM), Redis 7 |
 | IA | Groq (Llama 3.x), Deepgram, Cartesia, ElevenLabs |
-| Infra | Docker Compose, Nginx, GitHub Actions, GHCR |
+| Infra | Docker Compose, Nginx, GitHub Actions, GHCR, Let's Encrypt |
+| Client jeu | Unreal Engine 5.6, C++, Slate, GAS |
+| VCS client | Perforce (UE5 assets), Git (backend monorepo) |
 
 ## Statut actuel
 
-- ✅ Auth JWT HS256 fonctionnelle (register, login, refresh, logout)
-- ✅ Text chat `/text` avec historique NPC persistant
-- ✅ Voice chat `/audio` streaming (STT → LLM → TTS < 1s latency)
+- ✅ Auth JWT HS256 fonctionnelle (register, login, refresh, logout, Device flow)
+- ✅ Text chat `/text` avec historique NPC persistant et identité par PNJ
+- ✅ Voice chat `/audio` streaming (STT → LLM → TTS &lt; 1s latency)
 - ✅ CI/CD registry-based (GHCR) avec rollback par SHA
+- ✅ TLS direct VPS pour `api-game` via Let's Encrypt (bypass Cloudflare WS cap)
