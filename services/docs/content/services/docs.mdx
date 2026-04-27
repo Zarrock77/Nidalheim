@@ -1,74 +1,24 @@
 ---
-title: Frontends (site + docs)
+title: services/docs
 ---
 
-# Frontends
+# `services/docs` — Documentation interne
 
-Deux apps Next.js 16 séparées, avec deux rôles distincts.
+App **admin-only** : Nextra 4.6 avec catch-all route App Router et NextAuth credentials provider.
 
-## `web/site` — Site vitrine
-
-**Public-facing.** Register, login, marketing.
-
-### Stack
-
-- Next.js 16 (App Router, Turbopack en dev)
-- React 19
-- Tailwind CSS 4
-- Framer Motion pour les animations
-- MDX pour les patch notes
-
-### Routes
-
-- `/` — landing
-- `/register` — formulaire inscription → `api-auth POST /register`
-- `/login` — connexion → `api-auth POST /login`
-- `/device` — approbation Device Code Flow pour le client UE5 (voir [Auth → Device flow](/docs/auth#device-flow-ue5))
-- `/patch-notes` — liste MDX
-
-### Appel `api-auth`
-
-```ts
-// web/site/src/lib/auth/api.ts
-const API_URL =
-  process.env.NEXT_PUBLIC_API_AUTH_URL || "https://api-auth.nidalheim.com";
-```
-
-`NEXT_PUBLIC_API_AUTH_URL` est **inliné au build** (variable `NEXT_PUBLIC_*`). Pour dev local :
-
-```bash
-# web/site/.env.local
-NEXT_PUBLIC_API_AUTH_URL=http://localhost:3001
-```
-
-> ⚠️ Le Dockerfile de prod **ne passe pas** cette variable au build → le fallback hardcodé (`https://api-auth.nidalheim.com`) est utilisé. OK tant que le domaine prod ne change pas.
-
-### Dev
-
-```bash
-cd web/site
-pnpm dev --port 3003   # :3000 peut être pris par web/docs
-```
-
----
-
-## `web/docs` — Documentation interne
-
-**Admin-only.** Nextra 4.6 avec catch-all route App Router.
-
-### Stack
+## Stack
 
 - Next.js 16 + Nextra 4.6 + `nextra-theme-docs`
 - NextAuth 5 (credentials provider → `api-auth`)
 - Tailwind 4 (pour les pages hors Nextra)
 - Pagefind pour la search (build uniquement)
 
-### Auth
+## Auth
 
 NextAuth avec credentials provider qui parle à `api-auth` :
 
 ```ts
-// web/docs/src/lib/auth.ts
+// services/docs/src/lib/auth.ts
 Credentials({
   async authorize(credentials) {
     const res = await fetch(`${AUTH_API_URL}/login`, {
@@ -109,14 +59,14 @@ export const config = {
 };
 ```
 
-### Nextra — setup
+## Nextra — setup
 
 - **Config** : `next.config.ts` avec `nextra({ search: false, contentDirBasePath: "/docs" })`
 - **Content** : répertoire `content/` à la racine du package
 - **Catch-all route** : `src/app/docs/[[...mdxPath]]/page.tsx` utilise `importPage` de `nextra/pages` pour rendre le MDX du répertoire `content/`
 - **Layout Nextra** : `src/app/docs/layout.tsx` (navbar, sidebar, footer, search)
 
-### Recherche
+## Recherche
 
 Désactivée en dev (`search={null}` dans le `<Layout>`). La recherche Nextra 4 utilise **pagefind**, qui nécessite un build : `postbuild` script dans `package.json:10` lance `pagefind --site .next/server/app`.
 
@@ -125,10 +75,10 @@ Pour activer en prod :
 2. Remettre `search: true` (ou retirer la ligne) dans `next.config.ts`
 3. `pnpm build && pnpm start` — le postbuild générera `public/_pagefind/`
 
-### Structure du contenu MDX
+## Structure du contenu MDX
 
 ```
-web/docs/content/
+services/docs/content/
 ├── _meta.ts                  # ordre de nav au niveau racine
 ├── index.mdx                 → /docs
 ├── setup-project.mdx         → /docs/setup-project
@@ -137,16 +87,22 @@ web/docs/content/
 │   ├── _meta.ts              # ordre de nav du sous-dossier
 │   ├── api-auth.mdx          → /docs/services/api-auth
 │   ├── api-game.mdx          → /docs/services/api-game
-│   └── database.mdx          → /docs/services/database
+│   ├── database.mdx          → /docs/services/database
+│   ├── site.mdx              → /docs/services/site
+│   └── docs.mdx              → /docs/services/docs
 ├── auth.mdx                  → /docs/auth
 ├── voice-pipeline.mdx        → /docs/voice-pipeline
 ├── deploy.mdx                → /docs/deploy
 └── conventions.mdx           → /docs/conventions
 ```
 
-### Dev
+## Dev
 
 ```bash
-cd web/docs
-pnpm dev --port 3004   # :3000 est probablement pris par web/site
+cd services/docs
+pnpm dev --port 3004   # :3000 est probablement pris par services/site
 ```
+
+## Domaine prod
+
+`docs.nidalheim.com`. TLS terminé par Cloudflare (proxied), origin servi en HTTP/80 par le nginx du VPS.

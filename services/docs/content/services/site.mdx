@@ -1,0 +1,51 @@
+---
+title: services/site
+---
+
+# `services/site` — Site vitrine
+
+App **publique** : landing, register, login, marketing, approbation Device Code Flow pour le client UE5.
+
+## Stack
+
+- Next.js 16 (App Router, Turbopack en dev)
+- React 19
+- Tailwind CSS 4
+- Framer Motion pour les animations
+- MDX pour les patch notes
+
+## Routes
+
+- `/` — landing
+- `/register` — formulaire inscription → `api-auth POST /register`
+- `/login` — connexion → `api-auth POST /login`
+- `/device` — approbation Device Code Flow pour le client UE5 (voir [Auth → Device flow](/docs/auth#device-flow-ue5))
+- `/patch-notes` — liste MDX
+
+## Appel `api-auth`
+
+```ts
+// services/site/src/lib/auth/api.ts
+const API_URL =
+  process.env.NEXT_PUBLIC_API_AUTH_URL || "https://api-auth.nidalheim.com";
+```
+
+`NEXT_PUBLIC_API_AUTH_URL` est **inliné au build** (variable `NEXT_PUBLIC_*`). Pour dev local :
+
+```bash
+# services/site/.env.local
+NEXT_PUBLIC_API_AUTH_URL=http://localhost:3001
+```
+
+> ⚠️ Le Dockerfile de prod **ne passe pas** cette variable au build → le fallback hardcodé (`https://api-auth.nidalheim.com`) est utilisé. OK tant que le domaine prod ne change pas.
+
+## Dev
+
+```bash
+cd services/site
+pnpm dev --port 3003   # :3000 peut être pris par services/docs
+```
+
+## Domaine prod
+
+`www.nidalheim.com` (et redirect 301 depuis `nidalheim.com`). TLS terminé par Cloudflare (proxied), origin servi en HTTP/80 par le nginx du VPS.
