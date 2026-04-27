@@ -77,8 +77,8 @@ Format :
 | `services/api-auth` | **npm** |
 | `services/api-game` | pnpm |
 | `services/db` | pnpm |
-| `web/site` | pnpm |
-| `web/docs` | pnpm |
+| `services/site` | pnpm |
+| `services/docs` | pnpm |
 
 Pas de workspace racine — chaque package installe ses deps localement.
 
@@ -145,7 +145,7 @@ Si tu ajoutes des tests :
 
 ## ESLint / Prettier
 
-- **ESLint** : activé sur `web/site` et `web/docs` uniquement (`eslint-config-next`)
+- **ESLint** : activé sur `services/site` et `services/docs` uniquement (`eslint-config-next`)
 - **Pas d'ESLint** sur les services backend
 - **Pas de Prettier** configuré — relire à l'œil et garder cohérent avec le code existant
 

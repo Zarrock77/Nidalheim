@@ -9,9 +9,9 @@ Nidalheim — monorepo backend pour un jeu UE5 (dark fantasy nordique). Auth JWT
 ```
 services/api-auth/   # API REST auth (Express 5, JWT HS256, bcrypt, Redis, PostgreSQL)
 services/api-game/   # API WebSocket temps-réel (ws, Groq LLM, Deepgram STT, Cartesia TTS)
-services/db/         # Schema + migrations PostgreSQL (Drizzle ORM)
-web/site/            # Site vitrine + register/login (Next.js 16, React 19, Tailwind 4)
-web/docs/            # Documentation interne (Nextra 4, admin-only)
+services/db/         # Schéma + migrations PostgreSQL (Drizzle ORM)
+services/site/       # Site vitrine + register/login (Next.js 16, React 19, Tailwind 4)
+services/docs/       # Documentation interne (Nextra 4, admin-only)
 infra/               # Docker Compose, Nginx reverse proxy, .env
 infra/p4d/           # Serveur Perforce (assets UE5) — stack Docker séparé
 ```
@@ -28,8 +28,8 @@ cd services/db && pnpm migrate
 # Dev services
 cd services/api-auth && npm run dev     # :3001
 cd services/api-game && pnpm start      # :3002
-cd web/site && pnpm dev                 # :3000
-cd web/docs && pnpm dev --port 3004     # :3000 conflict avec site, utiliser un autre port
+cd services/site && pnpm dev            # :3000
+cd services/docs && pnpm dev --port 3004 # :3000 conflict avec site, utiliser un autre port
 
 # DB
 cd services/db
@@ -39,13 +39,13 @@ pnpm studio      # interface Drizzle Studio
 pnpm push        # sync direct (dev uniquement, bypass migrations)
 
 # Lint (web uniquement)
-cd web/site && pnpm lint
-cd web/docs && pnpm lint
+cd services/site && pnpm lint
+cd services/docs && pnpm lint
 
 # Build
 cd services/api-auth && npm run build
-cd web/site && pnpm build
-cd web/docs && pnpm build   # génère aussi l'index pagefind via postbuild
+cd services/site && pnpm build
+cd services/docs && pnpm build   # génère aussi l'index pagefind via postbuild
 ```
 
 ## Conventions de code
@@ -62,7 +62,7 @@ cd web/docs && pnpm build   # génère aussi l'index pagefind via postbuild
 
 ## Package managers
 
-- **pnpm** : `web/site`, `web/docs`, `services/api-game`, `services/db`
+- **pnpm** : `services/site`, `services/docs`, `services/api-game`, `services/db`
 - **npm** : `services/api-auth`
 
 Pas de workspace racine. Chaque service gère ses deps indépendamment.
@@ -85,9 +85,9 @@ Source de vérité : `infra/.env` (copié depuis `infra/.env.example`, gitignore
 | `JWT_SECRET` | api-auth, api-game | Secret HS256 partagé entre les deux services |
 | `JWT_ACCESS_TOKEN_EXPIRY` / `REFRESH_TOKEN_EXPIRY` | api-auth | Durées tokens (`15m` / `7d` par défaut) |
 | `CORS_ORIGINS` | api-auth | Liste séparée par virgules (default `https://www.nidalheim.com,http://localhost:3000`) |
-| `AUTH_SECRET` | web/docs | Secret NextAuth |
-| `AUTH_API_URL` | web/docs | URL de api-auth (default `http://localhost:3001`) |
-| `NEXT_PUBLIC_API_AUTH_URL` | web/site | URL de api-auth, inliné au build (default fallback `https://api-auth.nidalheim.com`) |
+| `AUTH_SECRET` | services/docs | Secret NextAuth |
+| `AUTH_API_URL` | services/docs | URL de api-auth (default `http://localhost:3001`) |
+| `NEXT_PUBLIC_API_AUTH_URL` | services/site | URL de api-auth, inliné au build (default fallback `https://api-auth.nidalheim.com`) |
 | `OPENAI_API_KEY` | api-game | Clé OpenAI (fallback LLM, jamais utilisé en pratique) |
 | `DEEPGRAM_API_KEY` | api-game | Speech-to-text (voice pipeline) |
 | `LLM_API_KEY` | api-game | Clé Groq (text + voice chat) |
@@ -132,11 +132,11 @@ Connexion locale par défaut : `postgresql://nidalheim:<password>@localhost:5432
 - Migrations dans `migrations/` ; le seed du NPC `default` est inclus dans `0002_*` (INSERT ... ON CONFLICT DO NOTHING)
 - Config : `drizzle.config.ts` (lit `../../infra/.env`)
 
-### web/site (Next.js 16 App Router)
+### services/site (Next.js 16 App Router)
 - Register, login, UI vitrine, framer-motion, MDX patch notes
 - Appelle `api-auth` via `NEXT_PUBLIC_API_AUTH_URL` (inliné au build, fallback prod hardcodé)
 
-### web/docs (Nextra 4.6 + NextAuth)
+### services/docs (Nextra 4.6 + NextAuth)
 - Next 16 App Router avec catch-all route `src/app/docs/[[...mdxPath]]/page.tsx`
 - Contenu MDX dans `content/` (racine du package docs)
 - Proxy/middleware auth : refuse tout user dont `role !== "admin"`
@@ -144,7 +144,7 @@ Connexion locale par défaut : `postgresql://nidalheim:<password>@localhost:5432
 
 ## Auth — flow complet
 
-1. `web/site` → `POST /register` ou `POST /login` sur `api-auth`
+1. `services/site` → `POST /register` ou `POST /login` sur `api-auth`
 2. `api-auth` renvoie `{ accessToken, refreshToken, user }`
 3. Le client stocke les tokens (UE5 via `NidalheimAuthStorage`, web via NextAuth session)
 4. UE5 connecte `api-game` via `wss://api-game.nidalheim.com/text?token=<accessToken>`
@@ -184,8 +184,8 @@ Workflow `.github/workflows/deploy.yml` sur push `main` :
 ## Points d'attention
 
 - Pas de tests configurés — pas de framework de test en place
-- ESLint uniquement sur `web/site` et `web/docs`, pas sur les backends
+- ESLint uniquement sur `services/site` et `services/docs`, pas sur les backends
 - Pas de Prettier configuré
 - Line endings mixtes (LF/CRLF)
-- Le `NEXT_PUBLIC_API_AUTH_URL` de `web/site` n'est pas passé au build Docker (utilise le fallback prod hardcodé)
-- `web/docs` utilise `src/proxy.ts` (renommé depuis `middleware.ts` en Next 16)
+- Le `NEXT_PUBLIC_API_AUTH_URL` de `services/site` n'est pas passé au build Docker (utilise le fallback prod hardcodé)
+- `services/docs` utilise `src/proxy.ts` (renommé depuis `middleware.ts` en Next 16)

@@ -9,7 +9,7 @@ Guide pas à pas pour lancer l'ensemble du backend Nidalheim sur ta machine.
 ## Prérequis
 
 - **Node.js 22+**
-- **pnpm 10+** (pour `web/*`, `services/api-game`, `services/db`)
+- **pnpm 10+** (pour `services/site`, `services/docs`, `services/api-game`, `services/db`)
 - **npm** (pour `services/api-auth`)
 - **Docker Desktop** (Postgres + Redis + nginx + tous les services en prod)
 - Un compte sur les providers IA : [Groq](https://console.groq.com), [Deepgram](https://deepgram.com), [Cartesia](https://cartesia.ai), optionnellement [ElevenLabs](https://elevenlabs.io)
@@ -78,8 +78,8 @@ cd services/api-auth && npm install
 
 # les autres utilisent pnpm
 cd services/api-game && pnpm install
-cd web/site          && pnpm install
-cd web/docs          && pnpm install
+cd services/site          && pnpm install
+cd services/docs          && pnpm install
 ```
 
 ## 6 — Lancer les services
@@ -94,10 +94,10 @@ cd services/api-auth && npm run dev
 cd services/api-game && pnpm start
 
 # Site vitrine (:3000)
-cd web/site && pnpm dev
+cd services/site && pnpm dev
 
 # Docs internes (port libre)
-cd web/docs && pnpm dev --port 3004
+cd services/docs && pnpm dev --port 3004
 ```
 
 ## 7 — Créer ton compte + devenir admin
@@ -115,16 +115,16 @@ Ou via **Drizzle Studio** :
 cd services/db && pnpm studio
 ```
 
-3. Login sur http://localhost:3004/login (ou le port où tourne `web/docs`)
+3. Login sur http://localhost:3004/login (ou le port où tourne `services/docs`)
 
 ## Structure des ports
 
 | Port | Service |
 |------|---------|
-| 3000 | `web/site` (Next.js dev) |
+| 3000 | `services/site` (Next.js dev) |
 | 3001 | `api-auth` |
 | 3002 | `api-game` (WebSocket) |
-| 3004 | `web/docs` (Next.js dev, port custom) |
+| 3004 | `services/docs` (Next.js dev, port custom) |
 | 5432 | Postgres |
 | 6379 | Redis |
 

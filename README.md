@@ -7,16 +7,16 @@ Backend monorepo du jeu **Nidalheim** (UE5, dark fantasy nordique) : authentific
 ```
 nidalheim/
 ├── services/
-│   ├── api-auth/      # API REST d'authentification (Express 5, JWT HS256, Postgres, Redis)
-│   ├── api-game/      # API WebSocket temps-réel (PNJ IA text + voice)
-│   └── db/            # Schéma PostgreSQL et migrations (Drizzle ORM)
-├── web/
-│   ├── site/          # Site vitrine + register/login (Next.js 16, Tailwind 4)
-│   └── docs/          # Documentation interne (Nextra 4, admin-only)
+│   ├── api-auth/             # API REST d'authentification (Express 5, JWT HS256, Postgres, Redis)
+│   ├── api-game/             # API WebSocket temps-réel (PNJ IA text + voice)
+│   ├── db/                   # Schéma PostgreSQL et migrations (Drizzle ORM)
+│   ├── site/                 # Site vitrine + register/login (Next.js 16, Tailwind 4)
+│   └── docs/                 # Documentation interne (Nextra 4, admin-only)
 └── infra/
     ├── docker-compose.yml
-    ├── nginx/         # Reverse proxy (4 sous-domaines)
-    ├── p4d/           # Serveur Perforce (assets UE5) — stack Docker séparé
+    ├── nginx/                # Reverse proxy (4 sous-domaines + TLS direct api-game)
+    ├── init-letsencrypt.sh   # Bootstrap Let's Encrypt (1× sur le VPS)
+    ├── p4d/                  # Serveur Perforce (assets UE5) — stack Docker séparé
     └── .env.example
 ```
 
@@ -24,7 +24,7 @@ nidalheim/
 
 | Couche | Technologies |
 |--------|--------------|
-| Runtime | Node.js 22, TypeScript (api-auth, db, web/*), JavaScript ESM (api-game) |
+| Runtime | Node.js 22, TypeScript (api-auth, db, site, docs), JavaScript ESM (api-game) |
 | Backend | Express 5, `ws` (WebSocket) |
 | Frontend | Next.js 16, React 19, Tailwind CSS 4, Nextra 4 (docs) |
 | Auth | JWT HS256, bcrypt 12 rounds, refresh tokens en Redis |
@@ -75,19 +75,19 @@ pnpm migrate
 ```bash
 cd services/api-auth  && npm install  && npm run dev    # :3001
 cd services/api-game  && pnpm install && pnpm start     # :3002
-cd web/site           && pnpm install && pnpm dev       # :3000
-cd web/docs           && pnpm install && pnpm dev       # :3000 (ou premier port libre)
+cd services/site      && pnpm install && pnpm dev       # :3000
+cd services/docs      && pnpm install && pnpm dev       # :3000 (ou premier port libre)
 ```
 
-> `web/site` et `web/docs` veulent tous les deux le port `3000`. Lance le second avec `--port 3001` (attention au conflit avec `api-auth`) ou un port libre :
+> `services/site` et `services/docs` veulent tous les deux le port `3000`. Lance le second avec `--port 3001` (attention au conflit avec `api-auth`) ou un port libre :
 > ```bash
-> cd web/docs && pnpm dev --port 3004
+> cd services/docs && pnpm dev --port 3004
 > ```
 
 ### 5 — S'enregistrer + devenir admin
 
-1. Register sur http://localhost:3000/register (sur `web/site`)
-2. Passer son user en admin pour accéder à `web/docs` :
+1. Register sur http://localhost:3000/register (sur `services/site`)
+2. Passer son user en admin pour accéder à `services/docs` :
    ```sql
    UPDATE users SET role = 'admin' WHERE username = 'ton_username';
    ```
@@ -95,12 +95,14 @@ cd web/docs           && pnpm install && pnpm dev       # :3000 (ou premier port
 
 ## Domaines (production)
 
-| Domaine | Service |
-|---------|---------|
-| `www.nidalheim.com` | Site vitrine |
-| `docs.nidalheim.com` | Documentation interne (admin-only) |
-| `api-auth.nidalheim.com` | API Auth (REST) |
-| `api-game.nidalheim.com` | API Game (WebSocket) |
+| Domaine | Service | Terminaison TLS |
+|---------|---------|-----------------|
+| `www.nidalheim.com` | Site vitrine | Cloudflare (proxied) |
+| `docs.nidalheim.com` | Documentation interne (admin-only) | Cloudflare (proxied) |
+| `api-auth.nidalheim.com` | API Auth (REST) | Cloudflare (proxied) |
+| `api-game.nidalheim.com` | API Game (WebSocket) | **VPS direct (Let's Encrypt)** |
+
+`api-game` bypass volontairement Cloudflare (DNS-only) pour éviter le cap WebSocket free. Cert auto-renouvelé par le service `certbot` du compose, bootstrap initial via `infra/init-letsencrypt.sh`. Détails : [docs/deploy](https://docs.nidalheim.com/docs/deploy#reverse-proxy-nginx).
 
 ## CI/CD
 
@@ -132,7 +134,7 @@ pnpm push        # sync direct (dev uniquement)
 
 ## Documentation développeur
 
-Une fois `web/docs` lancé et ton compte passé en `admin`, la doc complète (architecture, API, auth, voice pipeline, deploy) est sur http://localhost:3000/docs.
+Une fois `services/docs` lancé et ton compte passé en `admin`, la doc complète (architecture, API, auth, voice pipeline, deploy) est sur http://localhost:3000/docs.
 
 ## Licence
 

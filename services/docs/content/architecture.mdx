@@ -13,8 +13,7 @@ nidalheim/
 ├── services/
 │   ├── api-auth/      # Express 5 REST (auth)
 │   ├── api-game/      # ws WebSocket (IA temps-réel)
-│   └── db/            # Drizzle schéma + migrations
-├── web/
+│   ├── db/            # Drizzle schéma + migrations
 │   ├── site/          # Next.js vitrine
 │   └── docs/          # Nextra docs admin
 └── infra/
@@ -30,12 +29,12 @@ Pas de workspace racine — chaque package gère ses deps indépendamment (mixed
 
 ```
 ┌─────────────┐      POST /register             ┌──────────────┐
-│  web/site   │ ───────────────────────────▶   │              │
+│    site     │ ───────────────────────────▶   │              │
 │  (Next.js)  │ ◀─ { accessToken, refresh } ──  │   api-auth   │
 └─────────────┘                                 │  (Express)   │
                                                 │              │
 ┌─────────────┐      POST /login                │              │
-│  web/docs   │ ───────────────────────────▶   │              │
+│    docs     │ ───────────────────────────▶   │              │
 │  (NextAuth) │ ◀─ { user, accessToken } ─────  │              │
 └─────────────┘                                 └──────┬───────┘
                                                        │
@@ -73,7 +72,8 @@ Pas de workspace racine — chaque package gère ses deps indépendamment (mixed
 | `nidalheim-docs` | Next.js 16 | 3000 | Documentation admin-only |
 | `postgres` | Postgres 16 | 5432 | Users, player profiles, chat history |
 | `redis` | Redis 7 | 6379 | Refresh tokens (TTL 7j avec rotation) |
-| `nginx` | nginx alpine | 80 | Reverse proxy vers les 4 sous-domaines |
+| `nginx` | nginx alpine | 80, 443 | Reverse proxy + TLS direct pour `api-game` |
+| `certbot` | certbot/certbot | — | Renouvelle le cert Let's Encrypt en boucle (12h) |
 
 ## Reverse proxy (Nginx)
 
@@ -116,10 +116,10 @@ Utilisé uniquement par `api-auth` pour le stockage des **refresh tokens** avec 
 
 Deux niveaux d'auth indépendants :
 
-1. **`api-auth` ↔ UE5 / `web/site`** : JWT HS256, signé par `api-auth`, vérifié par `api-game`
-2. **`web/docs` ↔ utilisateur** : NextAuth credentials provider qui fait lui-même un `POST /login` sur `api-auth`, puis gate `role === "admin"`
+1. **`api-auth` ↔ UE5 / `services/site`** : JWT HS256, signé par `api-auth`, vérifié par `api-game`
+2. **`services/docs` ↔ utilisateur** : NextAuth credentials provider qui fait lui-même un `POST /login` sur `api-auth`, puis gate `role === "admin"`
 
-La clé `JWT_SECRET` est partagée entre `api-auth` et `api-game` via `infra/.env`. `web/docs` n'en a pas besoin (il parle à `api-auth` en HTTP directement).
+La clé `JWT_SECRET` est partagée entre `api-auth` et `api-game` via `infra/.env`. `services/docs` n'en a pas besoin (il parle à `api-auth` en HTTP directement).
 
 ## Décisions architecturales
 

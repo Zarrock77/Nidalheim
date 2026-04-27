@@ -7,7 +7,7 @@
 @variant dark (&:where(.dark *));
 
 /* Reverse border-radius — concave quarter-circle cuts at each corner. Shared
-   visual language with web/site. */
+   visual language with services/site. */
 .reverse-radius {
   --rr: 12px;
   -webkit-mask:

@@ -193,12 +193,12 @@ Détails dans **[api-auth → Device Authorization Grant](/docs/services/api-aut
 - Si `401` → appelle `/refresh` → retry
 - À la déco : `/logout` + purge du storage
 
-### Web (`web/docs` NextAuth)
+### Web (`services/docs` NextAuth)
 
 NextAuth gère le cookie de session httpOnly. L'access token est **stocké côté serveur** dans le JWT NextAuth, pas accessible en JavaScript côté client.
 
 ```ts
-// web/docs/src/lib/auth.ts
+// services/docs/src/lib/auth.ts
 async jwt({ token, user }) {
   if (user) {
     token.accessToken = user.accessToken;
@@ -209,7 +209,7 @@ async jwt({ token, user }) {
 }
 ```
 
-## Gate admin pour `web/docs`
+## Gate admin pour `services/docs`
 
 Callback `authorized` refuse les users non-admin :
 

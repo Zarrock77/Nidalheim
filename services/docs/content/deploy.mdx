@@ -43,8 +43,8 @@ push main
 
 | Service | Context Docker | Image |
 |---------|---------------|-------|
-| site | `./web/site` | `ghcr.io/epitechpromo2027/nidalheim-site` |
-| docs | `./web/docs` | `ghcr.io/epitechpromo2027/nidalheim-docs` |
+| site | `./services/site` | `ghcr.io/epitechpromo2027/nidalheim-site` |
+| docs | `./services/docs` | `ghcr.io/epitechpromo2027/nidalheim-docs` |
 | api-auth | `./services/api-auth` | `ghcr.io/epitechpromo2027/nidalheim-api-auth` |
 | api-game | `./services/api-game` | `ghcr.io/epitechpromo2027/nidalheim-api-game` |
 | db-migrate | `./services/db` | `ghcr.io/epitechpromo2027/nidalheim-db-migrate` |
@@ -114,7 +114,7 @@ Chaque service a **à la fois** `image:` et `build:` :
 nidalheim-site:
   image: ghcr.io/epitechpromo2027/nidalheim-site:${IMAGE_TAG:-latest}
   build:
-    context: ../web/site
+    context: ../services/site
     dockerfile: Dockerfile
 ```
 
@@ -181,7 +181,7 @@ Et nginx fait un `nginx -s reload` toutes les 6h pour prendre en compte les cert
 
 ### Pré-requis VPS
 
-- Port `443/tcp` ouvert sur le firewall OVH (en plus du `80/tcp`)
+- Ports `80/tcp` et `443/tcp` ouverts (firewall hébergeur + ufw/iptables système)
 - Enregistrement DNS `api-game.nidalheim.com` en mode **DNS only** sur Cloudflare (pas Proxied)
 
 ## Limites et améliorations futures

@@ -18,7 +18,7 @@ const CLIENT_NAME = 'Nidalheim Game';
 
 /**
  * Error strings matched by the web client's transparent refresh logic
- * (see web/site/src/lib/auth/AuthContext.tsx). Don't reword without
+ * (see services/site/src/lib/auth/AuthContext.tsx). Don't reword without
  * updating the client.
  */
 const ERR_MISSING_AUTH = 'Missing or invalid Authorization header';
@@ -161,7 +161,7 @@ router.post('/device/lookup', async (req: Request, res: Response) => {
 });
 
 /**
- * Called by `web/site` /device page after the user logs in and clicks
+ * Called by `services/site` /device page after the user logs in and clicks
  * "Approve". We mint a *separate* token pair for the device so the user
  * can revoke the device session without killing their web session.
  */

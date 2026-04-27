@@ -20,9 +20,9 @@ jobs:
       matrix:
         include:
           - service: site
-            context: ./web/site
+            context: ./services/site
           - service: docs
-            context: ./web/docs
+            context: ./services/docs
           - service: api-auth
             context: ./services/api-auth
           - service: api-game

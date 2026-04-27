@@ -2,7 +2,7 @@ services:
   nidalheim-site:
     image: ghcr.io/zarrock77/nidalheim-site:${IMAGE_TAG:-latest}
     build:
-      context: ../web/site
+      context: ../services/site
       dockerfile: Dockerfile
     container_name: nidalheim-site
     restart: unless-stopped
@@ -15,7 +15,7 @@ services:
   nidalheim-docs:
     image: ghcr.io/zarrock77/nidalheim-docs:${IMAGE_TAG:-latest}
     build:
-      context: ../web/docs
+      context: ../services/docs
       dockerfile: Dockerfile
     container_name: nidalheim-docs
     restart: unless-stopped
