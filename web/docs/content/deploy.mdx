@@ -139,11 +139,50 @@ Si une migration échoue, le workflow continue malgré tout → les services tou
 
 ## Reverse proxy Nginx
 
-Tous les services Docker tournent en réseau interne (`nidalheim-network`). **Seul nginx** est exposé sur `:80` à l'hôte.
+Tous les services Docker tournent en réseau interne (`nidalheim-network`). **Seul nginx** est exposé sur `:80` et `:443` à l'hôte.
 
 Nginx route vers les 4 sous-domaines (voir [Architecture](/docs/architecture#reverse-proxy-nginx)).
 
-**Pas de HTTPS au niveau Nginx** — délégué à la couche au-dessus (Cloudflare, par exemple).
+### TLS — stratégie hybride
+
+- **`www`, `docs`, `api-auth`** : passent par **Cloudflare proxy** (orange cloud). Cloudflare termine le TLS pour le client et tape le VPS en HTTP/80. Aucun cert sur le VPS pour ces vhosts.
+- **`api-game`** : **DNS-only** (gris). Le VPS termine le TLS lui-même via un cert **Let's Encrypt**. Bypass Cloudflare pour éviter son cap WebSocket free (idle timeout ~100s, buffering audio).
+
+### Bootstrap Let's Encrypt — une seule fois
+
+Avant le premier déploiement CI/CD qui inclut le bloc `listen 443 ssl`, il faut générer le cert sur le VPS, sinon nginx crashera (cert manquant) :
+
+```bash
+ssh vps
+cd ~/Nidalheim/infra
+chmod +x init-letsencrypt.sh
+./init-letsencrypt.sh
+```
+
+Le script :
+1. Crée un cert dummy temporaire pour permettre à nginx de démarrer
+2. Démarre nginx
+3. Lance `certbot certonly --webroot -w /var/www/certbot -d api-game.nidalheim.com` (challenge HTTP-01)
+4. Reload nginx avec le vrai cert
+
+Les certs sont stockés dans `infra/certbot/conf/` (bind mount, gitignored).
+
+### Renouvellement automatique
+
+Le service `certbot` du `docker-compose.yml` tourne en boucle :
+
+```yaml
+certbot:
+  image: certbot/certbot
+  entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+```
+
+Et nginx fait un `nginx -s reload` toutes les 6h pour prendre en compte les certs renouvelés (Let's Encrypt renouvelle un cert à 30 jours de l'expiration sur 90 jours de validité).
+
+### Pré-requis VPS
+
+- Port `443/tcp` ouvert sur le firewall OVH (en plus du `80/tcp`)
+- Enregistrement DNS `api-game.nidalheim.com` en mode **DNS only** sur Cloudflare (pas Proxied)
 
 ## Limites et améliorations futures
 

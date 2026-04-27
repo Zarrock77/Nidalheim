@@ -80,15 +80,24 @@ Pas de workspace racine — chaque package gère ses deps indépendamment (mixed
 Un seul conteneur Nginx route vers les 4 domaines :
 
 ```
-www.nidalheim.com       → nidalheim-site:3000
-docs.nidalheim.com      → nidalheim-docs:3000
-api-auth.nidalheim.com  → nidalheim-api-auth:3001
-api-game.nidalheim.com  → nidalheim-api-game:3002
+www.nidalheim.com       → nidalheim-site:3000           (Cloudflare → :80)
+docs.nidalheim.com      → nidalheim-docs:3000           (Cloudflare → :80)
+api-auth.nidalheim.com  → nidalheim-api-auth:3001       (Cloudflare → :80)
+api-game.nidalheim.com  → nidalheim-api-game:3002       (TLS direct → :443)
 ```
 
 Le bloc `api-game` active `proxy_http_version 1.1` + `Upgrade/Connection` pour le WebSocket, et `proxy_read_timeout 86400s` pour tenir les connexions voice de longue durée.
 
-Le TLS/HTTPS n'est **pas géré par ce Nginx** — c'est délégué à la couche au-dessus (Cloudflare, Let's Encrypt upstream, etc.).
+### Stratégie TLS hybride
+
+| Domaine | Cloudflare | Terminaison TLS |
+|---------|------------|-----------------|
+| `www`, `docs`, `api-auth`, root | Proxied (orange) | Cloudflare termine, tape origin en HTTP/80 |
+| `api-game` | DNS-only (gris) | **Nginx du VPS termine via Let's Encrypt** |
+
+`api-game` bypass volontairement Cloudflare pour éviter ses limites WebSocket en plan free (idle timeout ~100s, buffering qui ajoute de la latence sur le streaming audio Cartesia/Deepgram). Le cert est obtenu via challenge HTTP-01 webroot et renouvelé automatiquement par le service `certbot` défini dans `docker-compose.yml` (boucle `certbot renew` toutes les 12h).
+
+Voir [Déploiement / Reverse proxy Nginx](/docs/deploy#reverse-proxy-nginx) pour le bootstrap initial du cert.
 
 ## Données partagées
 

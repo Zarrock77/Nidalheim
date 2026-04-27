@@ -176,10 +176,10 @@ Workflow `.github/workflows/deploy.yml` sur push `main` :
 
 ## Domaines (production)
 
-- `www.nidalheim.com` → site
-- `docs.nidalheim.com` → docs (admin-only)
-- `api-auth.nidalheim.com` → auth REST
-- `api-game.nidalheim.com` → game WebSocket (nginx avec `proxy_read_timeout 86400s`)
+- `www.nidalheim.com` → site (TLS via Cloudflare proxy)
+- `docs.nidalheim.com` → docs admin-only (TLS via Cloudflare proxy)
+- `api-auth.nidalheim.com` → auth REST (TLS via Cloudflare proxy)
+- `api-game.nidalheim.com` → game WebSocket — **TLS direct VPS via Let's Encrypt** (DNS-only Cloudflare). Nginx avec `listen 443 ssl`, redirect 80→443, `proxy_read_timeout 86400s`. Bypass Cloudflare pour éviter le cap WebSocket free (idle 100s, buffering audio). Cert renouvelé en boucle par le service `certbot` du compose. Bootstrap initial via `infra/init-letsencrypt.sh` (à lancer 1× sur le VPS).
 
 ## Points d'attention
 
