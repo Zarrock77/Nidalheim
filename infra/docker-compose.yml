@@ -131,6 +131,8 @@ services:
       - ./certbot/www:/var/www/certbot:ro
     networks:
       - nidalheim-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - nidalheim-site
       - nidalheim-docs

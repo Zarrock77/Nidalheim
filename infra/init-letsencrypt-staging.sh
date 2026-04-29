@@ -1,17 +1,22 @@
 #!/bin/bash
 #
-# Bootstrap Let's Encrypt pour api-game.nidalheim.com
-# A lancer UNE FOIS sur le VPS depuis backend/infra/
-# Les renouvellements suivants sont gérés automatiquement par le service certbot
-# défini dans docker-compose.yml.
+# Bootstrap Let's Encrypt pour api-game-staging.nidalheim.com
+# Même logique que init-letsencrypt.sh mais pour le domaine de staging.
+# A lancer UNE FOIS sur le VPS depuis infra/. Renouvellements gérés par
+# le service certbot du compose.
+#
+# Pré-requis :
+#   - DNS-only (gris) sur Cloudflare pour api-game-staging.nidalheim.com
+#   - record A pointant sur l'IP du VPS
+#   - nginx.conf doit déjà contenir les server blocks pour ce domaine
 #
 set -e
 
-domains=(api-game.nidalheim.com)
+domains=(api-game-staging.nidalheim.com)
 rsa_key_size=4096
 data_path="./certbot"
 email="jean-jacques.delegue@epitech.eu"
-staging=0  # mettre à 1 pour tester avec les certs de staging (no rate limit)
+staging=0
 
 if ! [ -x "$(command -v docker)" ]; then
   echo "Erreur: docker n'est pas installé." >&2
@@ -41,7 +46,7 @@ docker compose run --rm --entrypoint "\
     -out '$path/fullchain.pem' \
     -subj '/CN=localhost'" certbot
 
-echo "### Démarrage de nginx avec le cert dummy..."
+echo "### Recreation de nginx avec extra_hosts + cert dummy..."
 docker compose up --force-recreate -d nginx
 
 echo "### Suppression du cert dummy..."
@@ -77,4 +82,4 @@ docker compose exec nginx nginx -s reload
 
 echo
 echo "### Done. Test:"
-echo "    curl -I https://api-game.nidalheim.com"
+echo "    curl -I https://api-game-staging.nidalheim.com"
