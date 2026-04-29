@@ -93,4 +93,11 @@ jobs:
             docker compose up -d --remove-orphans
             docker compose restart nginx
             docker compose run --rm db-migrate
+
+            # Staging DB: ensure exists, then migrate (best-effort, non-blocking)
+            docker compose exec -T postgres sh -c 'createdb -U $POSTGRES_USER nidalheim_staging 2>/dev/null || true'
+            docker compose run --rm \
+              -e DATABASE_URL="postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/nidalheim_staging" \
+              db-migrate || echo "Staging migration skipped"
+
             docker image prune -f

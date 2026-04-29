@@ -1,0 +1,20 @@
+[Unit]
+Description=Nidalheim api-game (staging, host process)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/Nidalheim/services/api-game
+ExecStart=/home/ubuntu/Nidalheim/services/api-game/start-staging.sh
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+StandardOutput=journal
+StandardError=journal
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target
