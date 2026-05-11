@@ -6,6 +6,13 @@ FROM base AS dependencies
 COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile --prod
 
+FROM base AS build
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY tsconfig.json ./
+COPY src ./src
+RUN pnpm build
+
 FROM node:22-slim AS run
 WORKDIR /app
 
@@ -17,8 +24,9 @@ RUN addgroup --system --gid 1001 nodejs \
  && adduser --system --uid 1001 appuser
 
 COPY --from=dependencies /app/node_modules ./node_modules
-COPY . .
+COPY --from=build /app/dist ./dist
+COPY package.json ./
 
 USER appuser
 
-CMD ["node", "src/index.js"]
+CMD ["node", "dist/index.js"]

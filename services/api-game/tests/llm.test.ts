@@ -1,6 +1,6 @@
-import { LLMStreaming } from "../src/providers/llm.js";
+import { LLMStreaming, type LLMStreamingOptions } from "../src/providers/llm.js";
 
-const build = (overrides = {}) =>
+const build = (overrides: Partial<LLMStreamingOptions> = {}): LLMStreaming =>
   new LLMStreaming("test-api-key", {
     systemPrompt: "test system prompt",
     maxHistoryMessages: 3,
@@ -14,7 +14,7 @@ describe("LLMStreaming", () => {
     });
 
     it("throws when systemPrompt is missing", () => {
-      expect(() => new LLMStreaming("key", {})).toThrow(/systemPrompt/);
+      expect(() => new LLMStreaming("key", { systemPrompt: "" })).toThrow(/systemPrompt/);
     });
 
     it("starts with an empty history", () => {
