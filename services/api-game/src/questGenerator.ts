@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
 import OpenAI from "openai";
 import type { AuthenticatedUser } from "./types.js";
 import { QUEST_SCHEMA_VERSION, type QuestData, type QuestGenerationContext } from "./questTypes.js";
-import { getPromptTags } from "./questTags.js";
+import { getLocationQuestTags, getPromptItemTags } from "./questTags.js";
 import { validateQuestData } from "./questValidator.js";
 
 export interface QuestGenerationInput {
@@ -44,7 +44,8 @@ export class QuestGenerator {
     if (!this.client) return null;
 
     const context = input.context ?? {};
-    const allowedTags = getPromptTags(context.knownTags);
+    const allowedItemTags = getPromptItemTags(context.knownTags);
+    const locationTags = getLocationQuestTags();
     const response = await this.client.chat.completions.create({
       model: this.model,
       temperature: 0.5,
@@ -56,10 +57,11 @@ export class QuestGenerator {
             "Retourne uniquement un objet JSON valide, sans markdown.",
             `schemaVersion doit etre "${QUEST_SCHEMA_VERSION}".`,
             'MVP: kind="structured", evaluationStrategy="client".',
-            'Objectifs autorises en generation MVP: "Kill" et "Collect" uniquement.',
-            "Utilise seulement les GameplayTags fournis.",
-            "Format Kill params: { targetTag, count }.",
-            "Format Collect params: { itemTag, count }.",
+            'Objectif autorise en generation MVP: "Collect" uniquement.',
+            "Ne genere jamais Kill, Reach, TalkTo, UseAbility ou OpenEnded pour ce MVP.",
+            "Utilise seulement les itemTags fournis pour params.itemTag.",
+            "Tu peux utiliser les locationTags uniquement dans le texte narratif ou en params.suggestedLocationTag.",
+            "Format Collect params: { itemTag, count, suggestedLocationTag? }.",
           ].join("\n"),
         },
         {
@@ -71,7 +73,8 @@ export class QuestGenerator {
             },
             issuerNpcId: input.issuerNpcId,
             context,
-            allowedTags,
+            allowedItemTags,
+            locationTags,
             requiredShape: {
               schemaVersion: QUEST_SCHEMA_VERSION,
               questId: "q_short_unique_id",
@@ -88,9 +91,9 @@ export class QuestGenerator {
                   objectives: [
                     {
                       objectiveId: "o1",
-                      type: "Kill",
-                      params: { targetTag: "Enemy.Wolf.Frost", count: 3 },
-                      displayText: "Abattre 3 loups des glaces",
+                      type: "Collect",
+                      params: { itemTag: "Item.Resource.Wood", count: 5 },
+                      displayText: "Rapporter 5 morceaux de bois",
                     },
                   ],
                   completion: { mode: "all" },
@@ -112,6 +115,14 @@ export class QuestGenerator {
       console.warn("[quest] LLM returned invalid quest:", validation.errors);
       return null;
     }
+    if (!isCollectOnlyQuest(validation.value)) {
+      console.warn("[quest] LLM returned non-Collect objective, using fallback");
+      return null;
+    }
+    if (!collectItemTagsAreAllowed(validation.value, allowedItemTags)) {
+      console.warn("[quest] LLM returned item tags outside the provided catalog, using fallback");
+      return null;
+    }
 
     return {
       ...validation.value,
@@ -126,37 +137,37 @@ export class QuestGenerator {
 
     const variants = [
       {
-        title: "Les crocs dans la brume",
-        summary: "Des loups des glaces rodent trop pres des sentiers du village.",
-        objective: {
-          objectiveId: "o1",
-          type: "Kill" as const,
-          params: { targetTag: "Enemy.Wolf.Frost", count: 3 },
-          displayText: "Abattre 3 loups des glaces",
-        },
-        rewards: { xp: 120, items: [] },
-      },
-      {
-        title: "Herbes sous le givre",
-        summary: "Le guerisseur manque de plantes capables de tenir le froid.",
+        title: "Bois pour le foyer",
+        summary: "Le village manque de bois sec avant la tombee de la nuit.",
         objective: {
           objectiveId: "o1",
           type: "Collect" as const,
-          params: { itemTag: "Item.Herb.Frostcap", count: 4 },
-          displayText: "Ramasser 4 herbes givrantes",
+          params: { itemTag: "Item.Resource.Wood", count: 5, suggestedLocationTag: "Location.Forest.Edge" },
+          displayText: "Rapporter 5 morceaux de bois",
         },
-        rewards: { xp: 90, items: [{ itemId: "healing_salve", count: 1 }] },
+        rewards: { xp: 90, items: [{ itemId: "GreenApple", count: 1 }] },
       },
       {
-        title: "Os anciens",
-        summary: "Des draugr sortent des tertres et menacent les fermes isolees.",
+        title: "Pierres de seuil",
+        summary: "Quelques pierres solides sont necessaires pour reparer le seuil du sanctuaire.",
         objective: {
           objectiveId: "o1",
-          type: "Kill" as const,
-          params: { targetTag: "Enemy.Draugr.Walker", count: 2 },
-          displayText: "Terrasser 2 draugr errants",
+          type: "Collect" as const,
+          params: { itemTag: "Item.Resource.Rock", count: 4, suggestedLocationTag: "Location.Cliff.Northshore" },
+          displayText: "Ramasser 4 pierres",
         },
-        rewards: { xp: 150, items: [] },
+        rewards: { xp: 110, items: [] },
+      },
+      {
+        title: "Pommes pour la veille",
+        summary: "Le garde demande des provisions faciles a emporter pour son tour de nuit.",
+        objective: {
+          objectiveId: "o1",
+          type: "Collect" as const,
+          params: { itemTag: "Item.Consumable.GreenApple", count: 3, suggestedLocationTag: "Location.Village.North" },
+          displayText: "Apporter 3 pommes vertes",
+        },
+        rewards: { xp: 100, items: [] },
       },
     ];
     const selected = variants[variant];
@@ -200,4 +211,18 @@ function parseJsonObject(raw: string): unknown {
 
 function createQuestId(): string {
   return `q_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
+}
+
+function isCollectOnlyQuest(quest: QuestData): boolean {
+  return quest.stages.every((stage) => stage.objectives.every((objective) => objective.type === "Collect"));
+}
+
+function collectItemTagsAreAllowed(quest: QuestData, allowedItemTags: string[]): boolean {
+  const allowed = new Set(allowedItemTags);
+  return quest.stages.every((stage) =>
+    stage.objectives.every((objective) => {
+      const itemTag = objective.params.itemTag;
+      return typeof itemTag === "string" && allowed.has(itemTag);
+    }),
+  );
 }

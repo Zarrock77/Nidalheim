@@ -73,7 +73,7 @@ async function handleTextConnection(
 
     history.push({ role: "user", content: userText });
     const messages = [
-      { role: "system" as const, content: npc.systemPrompt },
+      { role: "system" as const, content: withQuestChatPolicy(npc.systemPrompt) },
       ...history,
     ];
 
@@ -97,7 +97,7 @@ async function handleTextConnection(
     console.log(`[text ${user.username}/${npc.id}] npc: ${reply}`);
     websocket.send(reply);
 
-    if (shouldOfferQuest(userText)) {
+    if (shouldOfferQuest(userText, reply)) {
       void offerQuestFromText(websocket, user, npc, deps, userText, reply).catch((err) => {
         console.error(`[text ${user.username}/${npc.id}] quest offer failed:`, (err as Error)?.message ?? err);
       });
@@ -117,8 +117,34 @@ async function handleTextConnection(
   });
 }
 
-function shouldOfferQuest(userText: string): boolean {
-  return /\b(qu[eê]te|quest|mission)\b/i.test(userText);
+function withQuestChatPolicy(systemPrompt: string): string {
+  return [
+    systemPrompt,
+    "",
+    "Regle quetes MVP:",
+    "- Si proposer ou imposer une quete est coherent avec la conversation, fais-le naturellement dans ta reponse.",
+    "- Pour ce MVP, ne propose que des quetes de collecte: ramasser, rapporter, trouver ou recolter des objets.",
+    "- Ne decris pas de quete de combat, d'assassinat, d'escorte, de voyage obligatoire ou d'utilisation de competence.",
+    "- N'ecris jamais de JSON ou de balise technique dans le chat joueur.",
+  ].join("\n");
+}
+
+function shouldOfferQuest(userText: string, npcReply: string): boolean {
+  const user = normalizeForIntent(userText);
+  const reply = normalizeForIntent(npcReply);
+  const userAskedForQuest = /\b(quete|quest|mission|travail|service|aide)\b/i.test(user);
+  const npcProposedCollect =
+    /\b(ramasse|ramasser|rapporte|rapporter|apporte|apporter|collecte|collecter|recolte|recolter|rassemble|rassembler|trouve|trouver)\b/i.test(reply)
+    && /\b(bois|pierre|pierres|pomme|pommes|herbe|plante|minerai|fer|fragment|relique|rune|objet|materiau|ressource)\b/i.test(reply);
+
+  return userAskedForQuest || npcProposedCollect;
+}
+
+function normalizeForIntent(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLowerCase();
 }
 
 async function offerQuestFromText(

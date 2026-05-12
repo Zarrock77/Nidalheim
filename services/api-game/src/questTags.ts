@@ -4,9 +4,11 @@ export const DEFAULT_QUEST_TAGS = [
   "Enemy.Wolf.Frost",
   "Enemy.Bandit.Raider",
   "Enemy.Draugr.Walker",
-  "Item.Herb.Frostcap",
-  "Item.Ore.Iron",
-  "Item.Relic.RuneShard",
+  "Item.Resource.Wood",
+  "Item.Resource.Rock",
+  "Item.Consumable.GreenApple",
+  "Item.Weapon.Sword",
+  "Item.Weapon.IronAxe",
   "Location.Village.North",
   "Location.Forest.Edge",
   "Location.Cliff.Northshore",
@@ -53,4 +55,19 @@ export function getPromptTags(knownTags: string[] | undefined): string[] {
   }
 
   return [...DEFAULT_QUEST_TAGS];
+}
+
+export function getItemQuestTags(): string[] {
+  return DEFAULT_QUEST_TAGS.filter((tag) => tag.startsWith("Item."));
+}
+
+export function getLocationQuestTags(): string[] {
+  return DEFAULT_QUEST_TAGS.filter((tag) => tag.startsWith("Location."));
+}
+
+export function getPromptItemTags(knownTags: string[] | undefined): string[] {
+  const itemTags = new Set(getItemQuestTags());
+  const known = (knownTags ?? []).filter((tag) => itemTags.has(tag));
+
+  return known.length > 0 ? known : [...itemTags];
 }

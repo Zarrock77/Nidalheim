@@ -21,15 +21,21 @@ describe("QuestGenerator", () => {
   });
 
   it("returns a valid deterministic fallback shape when no LLM key is configured", async () => {
-    const quest = await new QuestGenerator().generateStructuredQuest({
-      user: { id: "u1", sub: "u1", username: "player", role: "player" },
-      context: { location: "village_north" },
-      fallbackVariant: 1,
-    });
+    const generator = new QuestGenerator();
+    const quests = await Promise.all([0, 1, 2].map((fallbackVariant) =>
+      generator.generateStructuredQuest({
+        user: { id: "u1", sub: "u1", username: "player", role: "player" },
+        context: { location: "village_north" },
+        fallbackVariant,
+      }),
+    ));
 
-    expect(quest.kind).toBe("structured");
-    expect(quest.evaluationStrategy).toBe("client");
-    expect(validateQuestData(quest).ok).toBe(true);
-    expect(quest.stages[0]?.objectives[0]?.type).toBe("Collect");
+    for (const quest of quests) {
+      expect(quest.kind).toBe("structured");
+      expect(quest.evaluationStrategy).toBe("client");
+      expect(validateQuestData(quest).ok).toBe(true);
+      expect(quest.stages[0]?.objectives[0]?.type).toBe("Collect");
+      expect(typeof quest.stages[0]?.objectives[0]?.params.itemTag).toBe("string");
+    }
   });
 });
