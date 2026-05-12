@@ -69,7 +69,8 @@ Pas de workspace racine. Chaque service gère ses deps indépendamment.
 
 ## Git
 
-- Branche principale : `main` (auto-deploy sur push)
+- Branche `main` : auto-deploy production
+- Branche `staging` : auto-deploy staging uniquement (`~/Nidalheim-staging`, scripts lances manuellement)
 - Commits : conventional commits (`feat:`, `fix:`, `refactor:`, `docs:`, `chore:`)
 - Ne pas committer : `.env`, `keys/`, `node_modules/`, `dist/`, `.next/`, `.claude/`
 
@@ -153,22 +154,33 @@ Connexion locale par défaut : `postgresql://nidalheim:<password>@localhost:5432
 
 ## CI/CD — registry-based
 
-Workflow `.github/workflows/deploy.yml` sur push `main` :
+Workflow `.github/workflows/deploy.yml` :
+
+### Production (`main`)
 
 1. **Job `build`** (matrix sur 5 services) :
-   - `docker build` + `docker push` vers `ghcr.io/epitechpromo2027/nidalheim-<service>:{sha,latest}`
+   - `docker build` + `docker push` vers `ghcr.io/zarrock77/nidalheim-<service>:{sha,latest}`
    - Cache GH Actions (`type=gha`) par service
-2. **Job `deploy`** (après build) :
+2. **Job `deploy-production`** (apres build) :
    - SSH sur VPS via `appleboy/ssh-action`
-   - Écrit `infra/.env` depuis les GH Secrets
-   - `docker login ghcr.io` avec `GHCR_PULL_TOKEN`
+   - met `~/Nidalheim` a jour sur `origin/main` en fast-forward
+   - ecrit `infra/.env` depuis les GH Secrets, avec `IMAGE_TAG=<sha>`
    - `docker compose pull && up -d --remove-orphans`
    - `docker compose run --rm db-migrate`
    - `docker image prune -f`
 
+### Staging (`staging`)
+
+1. Pas de build Docker : staging tourne en process host pour iterer vite.
+2. SSH VPS :
+   - clone/fetch puis realigne `~/Nidalheim-staging` sur `origin/staging` si le worktree est propre
+   - ecrit `~/Nidalheim-staging/infra/.env`
+   - cree/migre la base `${POSTGRES_DB}_staging`
+   - installe les deps des services staging
+   - ne restart pas les process staging ; ils sont lances manuellement via `start-staging.sh`
+
 ### Secrets GH requis
 - `VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY` — accès SSH
-- `GHCR_PULL_TOKEN` — PAT classique scope `read:packages` pour pull côté VPS (inutile si repo public)
 - `OPENAI_API_KEY`, `DEEPGRAM_API_KEY`, `LLM_API_KEY`, `CARTESIA_API_KEY`, `CARTESIA_VOICE_ID`
 - `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` (optionnels, peuvent être vides)
 - `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`
@@ -180,6 +192,15 @@ Workflow `.github/workflows/deploy.yml` sur push `main` :
 - `docs.nidalheim.com` → docs admin-only (TLS via Cloudflare proxy)
 - `api-auth.nidalheim.com` → auth REST (TLS via Cloudflare proxy)
 - `api-game.nidalheim.com` → game WebSocket — **TLS direct VPS via Let's Encrypt** (DNS-only Cloudflare). Nginx avec `listen 443 ssl`, redirect 80→443, `proxy_read_timeout 86400s`. Bypass Cloudflare pour éviter le cap WebSocket free (idle 100s, buffering audio). Cert renouvelé en boucle par le service `certbot` du compose. Bootstrap initial via `infra/init-letsencrypt.sh` (à lancer 1× sur le VPS).
+
+## Domaines (staging)
+
+- `www-staging.nidalheim.com` -> host process `localhost:3013`
+- `docs-staging.nidalheim.com` -> host process `localhost:3014`
+- `api-auth-staging.nidalheim.com` -> host process `localhost:3011`
+- `api-game-staging.nidalheim.com` -> host process `localhost:3012`, TLS direct VPS via Let's Encrypt
+
+Les process staging sont lances manuellement et lisent `~/Nidalheim-staging/infra/.env`.
 
 ## Points d'attention
 

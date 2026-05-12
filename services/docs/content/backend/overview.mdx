@@ -66,7 +66,7 @@ JWT **HS256** avec `JWT_SECRET` partagé entre `api-auth` (mint) et `api-game` (
 ## Infra & déploiement
 
 - **Domaines prod** : `www`, `docs`, `api-auth` passent par Cloudflare proxy (TLS Cloudflare → origin HTTP/80). `api-game` est en DNS-only avec **TLS direct VPS via Let's Encrypt** pour bypass le cap WebSocket de Cloudflare free.
-- **CI/CD** : push sur `main` → build matriciel des 5 images vers `ghcr.io/zarrock77/nidalheim-<service>:{sha,latest}` → SSH VPS → `docker compose pull && up -d`. Voir [Déploiement](/docs/backend/deploy).
+- **CI/CD** : push sur `main` → build matriciel des 5 images vers `ghcr.io/zarrock77/nidalheim-<service>:{sha,latest}` → prod Docker Compose. Push sur `staging` → update `~/Nidalheim-staging` + deps + migrations, sans restart automatique des scripts staging. Voir [Déploiement](/docs/backend/deploy).
 - **Renouvellement cert** : service `certbot` du compose tourne `certbot renew` toutes les 12h, nginx reload toutes les 6h. Bootstrap initial unique via `infra/init-letsencrypt.sh`.
 
 ## Stack en un coup d'œil

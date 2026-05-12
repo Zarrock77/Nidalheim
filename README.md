@@ -104,12 +104,24 @@ cd services/docs      && pnpm install && pnpm dev       # :3000 (ou premier port
 
 `api-game` bypass volontairement Cloudflare (DNS-only) pour éviter le cap WebSocket free. Cert auto-renouvelé par le service `certbot` du compose, bootstrap initial via `infra/init-letsencrypt.sh`. Détails : [docs/deploy](https://docs.nidalheim.com/docs/backend/deploy#reverse-proxy-nginx).
 
+## Domaines (staging)
+
+| Domaine | Service | Runtime |
+|---------|---------|---------|
+| `www-staging.nidalheim.com` | Site vitrine | Process host `pnpm dev` port `3013` |
+| `docs-staging.nidalheim.com` | Documentation | Process host `pnpm dev` port `3014` |
+| `api-auth-staging.nidalheim.com` | API Auth | Process host `npm run dev` port `3011` |
+| `api-game-staging.nidalheim.com` | API Game | Process host `pnpm dev` port `3012`, TLS direct VPS |
+
+La staging utilise un checkout VPS separe : `~/Nidalheim-staging`.
+Les services staging sont lances manuellement via les scripts `start-staging.sh` et utilisent la base `${POSTGRES_DB}_staging`.
+
 ## CI/CD
 
-Le workflow `.github/workflows/deploy.yml` sur push `main` :
+Le workflow `.github/workflows/deploy.yml` :
 
-1. **Build matrix** : build et push de 5 images Docker vers `ghcr.io/epitechpromo2027/nidalheim-<service>:{sha,latest}` en parallèle, avec cache GH Actions.
-2. **Deploy** : SSH sur le VPS, génération de `infra/.env` depuis les GitHub Secrets, `docker login ghcr.io`, `docker compose pull && up -d`, puis `docker compose run --rm db-migrate`.
+- Push sur `main` : build/push des images Docker vers GHCR puis deploiement production via `docker compose`.
+- Push sur `staging` : mise a jour de `~/Nidalheim-staging`, installation des deps, migration de la DB staging. Aucun restart automatique des scripts staging.
 
 Rollback en une ligne :
 ```bash

@@ -119,3 +119,7 @@ pnpm dev --port 3004   # :3000 est probablement pris par services/site
 ## Domaine prod
 
 `docs.nidalheim.com`. TLS terminé par Cloudflare (proxied), origin servi en HTTP/80 par le nginx du VPS.
+
+## Domaine staging
+
+`docs-staging.nidalheim.com`. Route nginx vers le process host `pnpm dev` sur le port `3014`.

@@ -5,8 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/ubuntu/Nidalheim/services/site
-ExecStart=/home/ubuntu/Nidalheim/services/site/start-staging.sh
+WorkingDirectory=/home/ubuntu/Nidalheim-staging/services/site
+Environment=NIDALHEIM_ROOT=/home/ubuntu/Nidalheim-staging
+ExecStart=/home/ubuntu/Nidalheim-staging/services/site/start-staging.sh
 Restart=on-failure
 RestartSec=5
 StartLimitIntervalSec=60

@@ -1,88 +1,129 @@
 # infra
 
-Configuration d'infrastructure Docker pour le deploiement de Nidalheim.
+Configuration d'infrastructure pour Nidalheim.
 
-## Services Docker
+La production tourne en Docker Compose. La staging tourne en process host, lancee manuellement via les scripts `start-staging.sh`, et nginx route les domaines staging vers `host.docker.internal`.
+
+## Production Docker
 
 | Service | Image | Port host | Description |
 |---------|-------|-----------|-------------|
-| `postgres` | `postgres:16-alpine` | `5432` | Base de donnees principale |
-| `redis` | `redis:7-alpine` | `6379` | Stockage des sessions/tokens |
-| `api-auth` | build local | `3001` (interne) | API d'authentification |
-| `api-game` | build local | `3002` (interne) | API de jeu WebSocket |
-| `nidalheim-site` | build local | `3000` (interne) | Site vitrine |
-| `nidalheim-docs` | build local | `3000` (interne) | Documentation |
-| `db-migrate` | build local | — | Migrations (run once) |
-| `nginx` | `nginx:stable-alpine` | `80`, `443` | Reverse proxy + TLS direct pour `api-game` |
-| `certbot` | `certbot/certbot` | — | Renouvellement auto Let's Encrypt (boucle 12h) |
+| `postgres` | `postgres:16-alpine` | `5432` | Postgres partage prod/staging, bases separees |
+| `redis` | `redis:7-alpine` | `6379` | Redis prod + Redis DB 1 pour staging auth |
+| `api-auth` | GHCR | interne `3001` | API d'authentification |
+| `api-game` | GHCR | interne `3002` | API de jeu WebSocket |
+| `nidalheim-site` | GHCR | interne `3000` | Site vitrine |
+| `nidalheim-docs` | GHCR | interne `3000` | Documentation |
+| `db-migrate` | GHCR | run once | Migrations Drizzle |
+| `nginx` | `nginx:stable-alpine` | `80`, `443` | Reverse proxy + TLS direct pour api-game |
+| `certbot` | `certbot/certbot` | aucun | Renouvellement Let's Encrypt |
 
-## Nginx — Routage par domaine
+## Staging host-process
 
-| Domaine | Upstream | Terminaison TLS |
-|---------|----------|-----------------|
-| `www.nidalheim.com` | `nidalheim-site:3000` | Cloudflare (proxied) |
-| `nidalheim.com` | redirect vers `www.` | Cloudflare (proxied) |
-| `docs.nidalheim.com` | `nidalheim-docs:3000` | Cloudflare (proxied) |
-| `api-auth.nidalheim.com` | `nidalheim-api-auth:3001` | Cloudflare (proxied) |
-| `api-game.nidalheim.com` | `nidalheim-api-game:3002` (WebSocket) | **VPS direct (Let's Encrypt)** |
+| Script | Port host | Domaine |
+|--------|-----------|---------|
+| `services/api-auth/start-staging.sh` | `3011` | `api-auth-staging.nidalheim.com` |
+| `services/api-game/start-staging.sh` | `3012` | `api-game-staging.nidalheim.com` |
+| `services/site/start-staging.sh` | `3013` | `www-staging.nidalheim.com` |
+| `services/docs/start-staging.sh` | `3014` | `docs-staging.nidalheim.com` |
 
-`api-game` est volontairement servi **sans Cloudflare** (DNS-only) pour éviter le cap WebSocket de Cloudflare free (idle timeout ~100s, buffering audio). Le VPS termine le TLS lui-même via un cert Let's Encrypt obtenu en HTTP-01 webroot.
+Les scripts doivent etre lances depuis le checkout `~/Nidalheim-staging` pour que la branche `staging` puisse etre deployee sans toucher au checkout prod `~/Nidalheim`.
+
+## Nginx
+
+Production :
+
+| Domaine | Upstream | TLS |
+|---------|----------|-----|
+| `www.nidalheim.com` | `nidalheim-site:3000` | Cloudflare proxied |
+| `nidalheim.com` | redirect vers `www.` | Cloudflare proxied |
+| `docs.nidalheim.com` | `nidalheim-docs:3000` | Cloudflare proxied |
+| `api-auth.nidalheim.com` | `nidalheim-api-auth:3001` | Cloudflare proxied |
+| `api-game.nidalheim.com` | `nidalheim-api-game:3002` | VPS direct Let's Encrypt |
+
+Staging :
+
+| Domaine | Upstream | TLS |
+|---------|----------|-----|
+| `www-staging.nidalheim.com` | `host.docker.internal:3013` | Cloudflare proxied |
+| `docs-staging.nidalheim.com` | `host.docker.internal:3014` | Cloudflare proxied |
+| `api-auth-staging.nidalheim.com` | `host.docker.internal:3011` | Cloudflare proxied |
+| `api-game-staging.nidalheim.com` | `host.docker.internal:3012` | VPS direct Let's Encrypt |
+
+`api-game` et `api-game-staging` restent en DNS-only sur Cloudflare pour eviter les limites WebSocket/audio de Cloudflare free.
 
 ## Commandes
 
 ```bash
-# Dev local (DB + cache seulement)
+# Dev local : DB + cache seulement
 docker compose up -d postgres redis
 
-# Deploiement complet
-docker compose build
-docker compose up -d
+# Deploiement production manuel
+docker compose pull
+docker compose up -d --remove-orphans
 docker compose run --rm db-migrate
 
-# Voir les logs
+# Logs production
 docker compose logs -f api-auth
+docker compose logs -f api-game
 docker compose logs -f nginx
-docker compose logs -f certbot
+
+# Lancer un service staging manuel
+cd ~/Nidalheim-staging/services/api-game
+./start-staging.sh
 ```
 
-## Bootstrap Let's Encrypt — à faire une seule fois sur le VPS
+## Bootstrap Let's Encrypt
+
+Production :
 
 ```bash
 chmod +x init-letsencrypt.sh
 ./init-letsencrypt.sh
 ```
 
-Le script :
-1. Crée un cert dummy temporaire (sinon nginx ne démarre pas avec `listen 443 ssl`)
-2. Démarre nginx
-3. Lance `certbot certonly --webroot` pour obtenir le vrai cert
-4. Reload nginx avec le vrai cert
-
-Après le bootstrap, le service `certbot` du compose tourne en boucle et appelle `certbot renew` toutes les 12h. Nginx se reload tout seul toutes les 6h pour prendre en compte les certs renouvelés.
-
-> **Important** : ce bootstrap doit être fait **avant** le premier déploiement CI/CD qui inclut les changements TLS, sinon nginx crashera (cert manquant).
-
-## Configuration
-
-Copier `.env.example` vers `.env` et renseigner les valeurs :
+Staging :
 
 ```bash
-cp .env.example .env
+chmod +x init-letsencrypt-staging.sh
+./init-letsencrypt-staging.sh
 ```
+
+Ces scripts creent un certificat dummy pour permettre a nginx de demarrer, demandent ensuite le vrai certificat Let's Encrypt, puis reload nginx.
+
+## Option systemd staging
+
+```bash
+chmod +x setup-staging-systemd.sh
+./setup-staging-systemd.sh
+```
+
+Le workflow GitHub Actions ne restart pas ces units. Elles sont conservees comme option si on veut plus tard remplacer le demarrage manuel par un demarrage supervise.
+
+## Variables
+
+`infra/.env` est genere par le workflow sur le VPS.
+
+Variables principales :
 
 | Variable | Description |
 |----------|-------------|
 | `POSTGRES_USER` | Utilisateur PostgreSQL |
 | `POSTGRES_PASSWORD` | Mot de passe PostgreSQL |
-| `POSTGRES_DB` | Nom de la base |
+| `POSTGRES_DB` | Base production, la staging utilise `${POSTGRES_DB}_staging` |
 | `OPENAI_API_KEY` | Cle API OpenAI |
-| `NIDALHEIM_API_KEY` | Cle d'authentification API interne |
-| `NEXT_PUBLIC_SUPABASE_URL` | URL Supabase |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Cle anonyme Supabase |
+| `DEEPGRAM_API_KEY` | Cle API Deepgram |
+| `LLM_API_KEY` | Cle LLM provider |
+| `LLM_BASE_URL` | URL compatible OpenAI |
+| `LLM_MODEL` | Modele LLM |
+| `CARTESIA_API_KEY` | Cle Cartesia |
+| `CARTESIA_VOICE_ID` | Voix Cartesia |
+| `AUTH_SECRET` | Secret NextAuth |
+| `JWT_SECRET` | Secret JWT partage api-auth/api-game |
 
 ## Volumes persistants
 
-- `postgres-data` (Docker volume) — données Postgres
-- `redis-data` (Docker volume) — données Redis
-- `./certbot/conf` (bind mount) — certs Let's Encrypt + config (gitignored)
-- `./certbot/www` (bind mount) — webroot pour le challenge HTTP-01 (gitignored)
+- `postgres-data` : donnees Postgres
+- `redis-data` : donnees Redis
+- `./certbot/conf` : certificats Let's Encrypt et config
+- `./certbot/www` : webroot HTTP-01

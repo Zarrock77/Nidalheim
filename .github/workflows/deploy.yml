@@ -2,15 +2,22 @@ name: Build and Deploy
 
 on:
   push:
-    branches: [main]
+    branches: [main, staging]
   workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
   IMAGE_PREFIX: ghcr.io/zarrock77/nidalheim
+  PRODUCTION_ROOT: /home/ubuntu/Nidalheim
+  STAGING_ROOT: /home/ubuntu/Nidalheim-staging
+
+concurrency:
+  group: deploy-${{ github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   build:
+    if: github.ref_name == 'main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -52,24 +59,28 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,scope=${{ matrix.service }},mode=max
 
-  deploy:
+  deploy-production:
+    if: github.ref_name == 'main'
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: Deploy to VPS
+      - name: Deploy production to VPS
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
+            set -e
             eval $(ssh-agent -s)
             ssh-add ~/.ssh/system
-            cd ./Nidalheim
+            cd "${{ env.PRODUCTION_ROOT }}"
 
-            git pull
+            git fetch origin main
+            git checkout main
+            git pull --ff-only origin main
 
-            cat > infra/.env << ENVEOF
+            cat > infra/.env << 'ENVEOF'
             IMAGE_TAG=${{ github.sha }}
             OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
             DEEPGRAM_API_KEY=${{ secrets.DEEPGRAM_API_KEY }}
@@ -87,17 +98,89 @@ jobs:
             AUTH_SECRET=${{ secrets.AUTH_SECRET }}
             JWT_SECRET=${{ secrets.JWT_SECRET }}
             ENVEOF
+            chmod 600 infra/.env
 
             cd infra
             docker compose pull
             docker compose up -d --remove-orphans
             docker compose restart nginx
             docker compose run --rm db-migrate
-
-            # Staging DB: ensure exists, then migrate (best-effort, non-blocking)
-            docker compose exec -T postgres sh -c 'createdb -U $POSTGRES_USER nidalheim_staging 2>/dev/null || true'
-            docker compose run --rm \
-              -e DATABASE_URL="postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/nidalheim_staging" \
-              db-migrate || echo "Staging migration skipped"
-
             docker image prune -f
+
+  deploy-staging:
+    if: github.ref_name == 'staging'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy staging to VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            set -e
+            eval $(ssh-agent -s)
+            ssh-add ~/.ssh/system
+
+            PROD_ROOT="${{ env.PRODUCTION_ROOT }}"
+            STAGING_ROOT="${{ env.STAGING_ROOT }}"
+            if [ -d "$PROD_ROOT/.git" ]; then
+              REPO_URL="$(git -C "$PROD_ROOT" config --get remote.origin.url)"
+            else
+              REPO_URL="git@github.com:Zarrock77/Nidalheim.git"
+            fi
+
+            if [ ! -d "$STAGING_ROOT/.git" ]; then
+              git clone "$REPO_URL" "$STAGING_ROOT"
+            fi
+
+            cd "$STAGING_ROOT"
+            git fetch origin staging
+            if ! git diff --quiet || ! git diff --cached --quiet; then
+              echo "Staging checkout has local changes; refusing to overwrite it."
+              git status --short
+              exit 1
+            fi
+            git checkout -B staging origin/staging
+
+            cat > infra/.env << 'ENVEOF'
+            OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+            DEEPGRAM_API_KEY=${{ secrets.DEEPGRAM_API_KEY }}
+            LLM_API_KEY=${{ secrets.LLM_API_KEY }}
+            LLM_BASE_URL=https://api.groq.com/openai/v1
+            LLM_MODEL=llama-3.1-8b-instant
+            TTS_PROVIDER=cartesia
+            CARTESIA_API_KEY=${{ secrets.CARTESIA_API_KEY }}
+            CARTESIA_VOICE_ID=${{ secrets.CARTESIA_VOICE_ID }}
+            ELEVENLABS_API_KEY=${{ secrets.ELEVENLABS_API_KEY }}
+            ELEVENLABS_VOICE_ID=${{ secrets.ELEVENLABS_VOICE_ID }}
+            POSTGRES_USER=${{ secrets.POSTGRES_USER }}
+            POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+            POSTGRES_DB=${{ secrets.POSTGRES_DB }}
+            AUTH_SECRET=${{ secrets.AUTH_SECRET }}
+            JWT_SECRET=${{ secrets.JWT_SECRET }}
+            ENVEOF
+            chmod 600 infra/.env
+
+            STAGING_DB="${{ secrets.POSTGRES_DB }}_staging"
+            docker exec nidalheim-postgres sh -c 'createdb -U "$POSTGRES_USER" "$1" 2>/dev/null || true' sh "$STAGING_DB"
+
+            cd "$STAGING_ROOT/services/db"
+            export PATH="$HOME/.local/share/pnpm:$PATH"
+            pnpm install --frozen-lockfile
+            DATABASE_URL="postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@localhost:5432/$STAGING_DB" pnpm migrate
+
+            cd "$STAGING_ROOT/services/api-auth"
+            npm install --no-audit --no-fund
+
+            cd "$STAGING_ROOT/services/api-game"
+            pnpm install --frozen-lockfile
+
+            cd "$STAGING_ROOT/services/site"
+            pnpm install --frozen-lockfile
+
+            cd "$STAGING_ROOT/services/docs"
+            pnpm install --frozen-lockfile
+
+            echo "Staging checkout updated in $STAGING_ROOT."
+            echo "Start or keep manual staging scripts running from $STAGING_ROOT/services/*/start-staging.sh."

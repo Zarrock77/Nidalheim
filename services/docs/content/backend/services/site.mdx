@@ -49,3 +49,7 @@ pnpm dev --port 3003   # :3000 peut être pris par services/docs
 ## Domaine prod
 
 `www.nidalheim.com` (et redirect 301 depuis `nidalheim.com`). TLS terminé par Cloudflare (proxied), origin servi en HTTP/80 par le nginx du VPS.
+
+## Domaine staging
+
+`www-staging.nidalheim.com`. Route nginx vers le process host `pnpm dev` sur le port `3013`.

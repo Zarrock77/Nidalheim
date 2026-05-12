@@ -1,221 +1,228 @@
 ---
-title: Déploiement
+title: Deploiement
 ---
 
-# Déploiement
+# Deploiement
 
-Pipeline CI/CD **registry-based** via GitHub Actions et GitHub Container Registry (GHCR).
+Le pipeline CI/CD est defini dans `.github/workflows/deploy.yml`.
 
-Push sur `main` → build parallèle de 5 images Docker → push sur GHCR → SSH VPS → `docker compose pull && up -d`.
+Il a deux chemins separes :
 
-## Workflow en 2 jobs
+- push sur `main` : build/push Docker vers GHCR, puis deploiement production via Docker Compose.
+- push sur `staging` : update du checkout `~/Nidalheim-staging`, installation des deps, migrations DB staging. Aucun restart automatique des scripts staging.
 
-```
-push main
-    │
-    ▼
-┌─────────────────────────────────────────────┐
-│ Job 1 — build (matrix × 5 services)         │
-│  - checkout                                  │
-│  - setup-buildx                              │
-│  - login GHCR (GITHUB_TOKEN)                 │
-│  - docker build + push                       │
-│    → ghcr.io/.../nidalheim-<svc>:<sha>       │
-│    → ghcr.io/.../nidalheim-<svc>:latest      │
-│  - cache type=gha                            │
-└─────────────────────────────────────────────┘
-    │
-    ▼
-┌─────────────────────────────────────────────┐
-│ Job 2 — deploy                               │
-│  - SSH vers VPS                              │
-│  - git pull (pour docker-compose + nginx)    │
-│  - heredoc infra/.env depuis GH Secrets      │
-│  - docker login ghcr.io (GHCR_PULL_TOKEN)    │
-│  - docker compose pull                       │
-│  - docker compose up -d --remove-orphans     │
-│  - docker compose run --rm db-migrate        │
-│  - docker image prune -f                     │
-└─────────────────────────────────────────────┘
-```
+La staging ne build pas d'images Docker. Elle tourne en process host avec les scripts `start-staging.sh` pour permettre une iteration rapide sur les domaines `*-staging.nidalheim.com`.
 
-## Services buildés
+## Branches
+
+| Branche | Runtime | Checkout VPS | Base DB | Domaine |
+|---------|---------|--------------|---------|---------|
+| `main` | Docker Compose | `~/Nidalheim` | `${POSTGRES_DB}` | `*.nidalheim.com` |
+| `staging` | scripts dev lances manuellement | `~/Nidalheim-staging` | `${POSTGRES_DB}_staging` | `*-staging.nidalheim.com` |
+
+La prod et la staging partagent le meme VPS, le meme Postgres Docker et le meme Redis Docker, mais pas la meme base Postgres. La staging utilise Redis DB 1 dans `api-auth/start-staging.sh`.
+
+## Production (`main`)
+
+### Build
+
+Le job `build` s'execute seulement sur `main`.
+
+Il build et push 5 images :
 
 | Service | Context Docker | Image |
-|---------|---------------|-------|
-| site | `./services/site` | `ghcr.io/epitechpromo2027/nidalheim-site` |
-| docs | `./services/docs` | `ghcr.io/epitechpromo2027/nidalheim-docs` |
-| api-auth | `./services/api-auth` | `ghcr.io/epitechpromo2027/nidalheim-api-auth` |
-| api-game | `./services/api-game` | `ghcr.io/epitechpromo2027/nidalheim-api-game` |
-| db-migrate | `./services/db` | `ghcr.io/epitechpromo2027/nidalheim-db-migrate` |
+|---------|----------------|-------|
+| site | `./services/site` | `ghcr.io/zarrock77/nidalheim-site` |
+| docs | `./services/docs` | `ghcr.io/zarrock77/nidalheim-docs` |
+| api-auth | `./services/api-auth` | `ghcr.io/zarrock77/nidalheim-api-auth` |
+| api-game | `./services/api-game` | `ghcr.io/zarrock77/nidalheim-api-game` |
+| db-migrate | `./services/db` | `ghcr.io/zarrock77/nidalheim-db-migrate` |
 
-Chaque image est taguée **deux fois** :
-- `:latest` — mutable, remplacé à chaque push sur main
-- `:<full-sha>` — immuable, permet le rollback
+Chaque image est taguee deux fois :
 
-## Rollback
+- `:latest` : derniere prod publiee par `main`.
+- `:<full-sha>` : version immuable utilisee par le deploy et le rollback.
 
-Sur le VPS :
+Il n'y a pas de tag `:prod-latest` : dans ce setup, `:latest` est deja le tag prod. Un tag `:staging-latest` n'aurait du sens que si la staging consommait aussi des images Docker.
+
+### Deploy
+
+Le job `deploy-production` :
+
+1. se connecte au VPS en SSH ;
+2. met `~/Nidalheim` a jour sur `origin/main` en fast-forward ;
+3. ecrit `~/Nidalheim/infra/.env` depuis les GitHub Secrets, avec `IMAGE_TAG=${{ github.sha }}` ;
+4. lance `docker compose pull` ;
+5. lance `docker compose up -d --remove-orphans` ;
+6. restart nginx ;
+7. execute `docker compose run --rm db-migrate` ;
+8. prune les images Docker inutilisees.
+
+Le compose utilise `image: ghcr.io/zarrock77/nidalheim-<service>:${IMAGE_TAG:-latest}`. En deploy CI, `IMAGE_TAG` pointe donc sur le SHA exact qui vient d'etre build.
+
+## Staging (`staging`)
+
+Le job `deploy-staging` ne depend pas du job Docker `build`.
+
+Il :
+
+1. se connecte au VPS en SSH ;
+2. clone `~/Nidalheim-staging` si le checkout n'existe pas encore ;
+3. realigne ce checkout sur `origin/staging` si le worktree est propre ;
+4. ecrit `~/Nidalheim-staging/infra/.env` depuis les GitHub Secrets ;
+5. cree la base `${POSTGRES_DB}_staging` si besoin ;
+6. execute les migrations Drizzle sur cette base ;
+7. installe les dependances des services staging ;
+8. ne restart aucun process staging.
+
+Scripts staging :
+
+| Script | Port host | Domaine |
+|--------|-----------|---------|
+| `services/api-auth/start-staging.sh` | `3011` | `api-auth-staging.nidalheim.com` |
+| `services/api-game/start-staging.sh` | `3012` | `api-game-staging.nidalheim.com` |
+| `services/site/start-staging.sh` | `3013` | `www-staging.nidalheim.com` |
+| `services/docs/start-staging.sh` | `3014` | `docs-staging.nidalheim.com` |
+
+Les scripts staging calculent leur racine avec `NIDALHEIM_ROOT` ou, par defaut, avec leur emplacement sur disque. Pour isoler la prod, ils doivent etre lances depuis `~/Nidalheim-staging`, pas depuis `~/Nidalheim`.
+
+## Domaines et TLS
+
+Production :
+
+| Domaine | Upstream | TLS |
+|---------|----------|-----|
+| `www.nidalheim.com` | `nidalheim-site:3000` | Cloudflare proxied |
+| `docs.nidalheim.com` | `nidalheim-docs:3000` | Cloudflare proxied |
+| `api-auth.nidalheim.com` | `nidalheim-api-auth:3001` | Cloudflare proxied |
+| `api-game.nidalheim.com` | `nidalheim-api-game:3002` | VPS direct Let's Encrypt |
+
+Staging :
+
+| Domaine | Upstream | TLS |
+|---------|----------|-----|
+| `www-staging.nidalheim.com` | `host.docker.internal:3013` | Cloudflare proxied |
+| `docs-staging.nidalheim.com` | `host.docker.internal:3014` | Cloudflare proxied |
+| `api-auth-staging.nidalheim.com` | `host.docker.internal:3011` | Cloudflare proxied |
+| `api-game-staging.nidalheim.com` | `host.docker.internal:3012` | VPS direct Let's Encrypt |
+
+`api-game` et `api-game-staging` doivent rester en DNS-only sur Cloudflare. Le VPS termine TLS directement pour eviter les limitations WebSocket/audio de Cloudflare free.
+
+## Bootstrap VPS
+
+Production, une seule fois :
+
 ```bash
-cd ~/Nidalheim/infra
-IMAGE_TAG=<sha-antérieur> docker compose up -d
-```
-
-Le `docker-compose.yml` utilise `image: ghcr.io/.../nidalheim-<svc>:${IMAGE_TAG:-latest}` — il suffit d'exporter `IMAGE_TAG` pour pin une version précédente.
-
-## Secrets GitHub
-
-### Accès VPS
-- `VPS_HOST` — hostname du VPS
-- `VPS_USER` — user SSH
-- `VPS_SSH_KEY` — clé privée SSH (format PEM)
-
-### Registry
-- `GHCR_PULL_TOKEN` — Personal Access Token classique, scope `read:packages` uniquement.
-  **Inutile si le repo est public.**
-
-### Secrets applicatifs (écrits dans `infra/.env` sur le VPS)
-- `OPENAI_API_KEY`
-- `DEEPGRAM_API_KEY`
-- `LLM_API_KEY` (Groq)
-- `CARTESIA_API_KEY`, `CARTESIA_VOICE_ID`
-- `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID` (peuvent être vides)
-- `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`
-- `AUTH_SECRET` (NextAuth)
-- `JWT_SECRET` (HS256 partagé api-auth ↔ api-game)
-
-Valeurs hardcodées dans le workflow (pas de secret nécessaire) :
-- `LLM_BASE_URL=https://api.groq.com/openai/v1`
-- `LLM_MODEL=llama-3.1-8b-instant`
-- `TTS_PROVIDER=cartesia`
-
-## Setup VPS — une seule fois
-
-```bash
-# 1. Cloner le repo dans ~/Nidalheim
 ssh vps
 cd ~
-git clone git@github.com:EpitechPromo2027/G-EIP-600-PAR-6-1-eip-merwan.korkmaz.git Nidalheim
-
-# 2. Install Docker + docker compose plugin (classique)
-
-# 3. Aucun besoin de générer des clés JWT (HS256 n'en utilise plus)
-
-# 4. Premier run — le workflow s'occupera du reste
-```
-
-Le workflow écrit automatiquement `infra/.env` à chaque deploy → pas besoin de le créer à la main.
-
-## `docker-compose.yml` — clé du setup
-
-Chaque service a **à la fois** `image:` et `build:` :
-
-```yaml
-nidalheim-site:
-  image: ghcr.io/epitechpromo2027/nidalheim-site:${IMAGE_TAG:-latest}
-  build:
-    context: ../services/site
-    dockerfile: Dockerfile
-```
-
-Comportement :
-- `docker compose up` → pull l'image (priorité à `image:`)
-- `docker compose build` → force un build local (via `build:`)
-- `docker compose pull` → pull uniquement, sans démarrer
-
-C'est la combinaison qui permet au workflow registry-based de fonctionner tout en gardant la possibilité de build localement en dev.
-
-## Migrations DB
-
-Lancées **après** `docker compose up -d` :
-
-```bash
-docker compose run --rm db-migrate
-```
-
-Le container `db-migrate` exécute `tsx src/migrate.ts` puis exit. Il ne fait pas partie du `up -d` (il n'a pas vocation à tourner en permanence).
-
-Si une migration échoue, le workflow continue malgré tout → les services tournent avec un schéma potentiellement incohérent. **À hardener** avec un `|| exit 1` explicite.
-
-## Reverse proxy Nginx
-
-Tous les services Docker tournent en réseau interne (`nidalheim-network`). **Seul nginx** est exposé sur `:80` et `:443` à l'hôte.
-
-Nginx route vers les 4 sous-domaines (voir [Architecture](/docs/backend/architecture#reverse-proxy-nginx)).
-
-### TLS — stratégie hybride
-
-- **`www`, `docs`, `api-auth`** : passent par **Cloudflare proxy** (orange cloud). Cloudflare termine le TLS pour le client et tape le VPS en HTTP/80. Aucun cert sur le VPS pour ces vhosts.
-- **`api-game`** : **DNS-only** (gris). Le VPS termine le TLS lui-même via un cert **Let's Encrypt**. Bypass Cloudflare pour éviter son cap WebSocket free (idle timeout ~100s, buffering audio).
-
-### Bootstrap Let's Encrypt — une seule fois
-
-Avant le premier déploiement CI/CD qui inclut le bloc `listen 443 ssl`, il faut générer le cert sur le VPS, sinon nginx crashera (cert manquant) :
-
-```bash
-ssh vps
+git clone git@github.com:Zarrock77/Nidalheim.git Nidalheim
 cd ~/Nidalheim/infra
 chmod +x init-letsencrypt.sh
 ./init-letsencrypt.sh
 ```
 
-Le script :
-1. Crée un cert dummy temporaire pour permettre à nginx de démarrer
-2. Démarre nginx
-3. Lance `certbot certonly --webroot -w /var/www/certbot -d api-game.nidalheim.com` (challenge HTTP-01)
-4. Reload nginx avec le vrai cert
+Staging, une seule fois apres que `nginx.conf` contient les blocs staging :
 
-Les certs sont stockés dans `infra/certbot/conf/` (bind mount, gitignored).
-
-### Renouvellement automatique
-
-Le service `certbot` du `docker-compose.yml` tourne en boucle :
-
-```yaml
-certbot:
-  image: certbot/certbot
-  entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
-```
-
-Et nginx fait un `nginx -s reload` toutes les 6h pour prendre en compte les certs renouvelés (Let's Encrypt renouvelle un cert à 30 jours de l'expiration sur 90 jours de validité).
-
-### Pré-requis VPS
-
-- Ports `80/tcp` et `443/tcp` ouverts (firewall hébergeur + ufw/iptables système)
-- Enregistrement DNS `api-game.nidalheim.com` en mode **DNS only** sur Cloudflare (pas Proxied)
-
-## Limites et améliorations futures
-
-### Actuelles
-
-- ❌ Pas de lint / test / typecheck avant le deploy → un commit qui ne build pas casse la prod
-- ❌ Pas de healthcheck post-deploy → un container qui crash-loop n'est pas détecté par la CI
-- ❌ Migration fail silencieusement (cf. ci-dessus)
-- ❌ GHCR 500 MB free tier en privé → limite vite atteinte si on tag trop
-
-### Améliorations identifiées
-
-1. **Job `check` avant `build`** : lint + typecheck + build local de chaque service. Bloque le deploy si le code ne compile pas.
-2. **Job `verify` après `deploy`** : curl sur les 4 domaines, fail si code ≠ 200.
-3. **Retention policy GHCR** : ne garder que les N derniers tags immutables (+ `:latest`), prune le reste automatiquement.
-4. **Repo public** → GHCR illimité et GH Actions minutes illimitées.
-5. **Backups Postgres** via `pg_dump` + stockage objet externe.
-
-## Déploiement manuel
-
-Si tu veux re-trigger le workflow sans push :
-```bash
-gh workflow run deploy.yml
-```
-
-Ou directement sur le VPS sans passer par GH Actions :
 ```bash
 ssh vps
-cd ~/Nidalheim
-git pull
-cd infra
-# Assurer que infra/.env est à jour
-docker compose pull
-docker compose up -d
+cd ~/Nidalheim/infra
+chmod +x init-letsencrypt-staging.sh
+./init-letsencrypt-staging.sh
+```
+
+Les scripts staging se lancent ensuite a la main depuis `~/Nidalheim-staging/services/<service>/start-staging.sh`. Les units systemd restent disponibles dans `infra/systemd/` comme option future, mais le workflow ne les restart pas.
+
+## Migrations DB
+
+Production :
+
+```bash
+cd ~/Nidalheim/infra
 docker compose run --rm db-migrate
 ```
+
+Staging :
+
+```bash
+cd ~/Nidalheim-staging/services/db
+DATABASE_URL="postgresql://<user>:<password>@localhost:5432/<db>_staging" pnpm migrate
+```
+
+Le workflow staging cree la base avant migration :
+
+```bash
+docker exec nidalheim-postgres sh -c "createdb -U '<user>' '<db>_staging' 2>/dev/null || true"
+```
+
+## Rollback production
+
+Sur le VPS :
+
+```bash
+cd ~/Nidalheim/infra
+IMAGE_TAG=<sha-anterieur> docker compose up -d
+```
+
+Le rollback staging se fait en repointant la branche `staging` sur le commit voulu puis en pushant `staging`. Le workflow refuse d'ecraser un worktree staging avec des modifications locales non committees.
+
+## Secrets GitHub
+
+Acces VPS :
+
+- `VPS_HOST`
+- `VPS_USER`
+- `VPS_SSH_KEY`
+
+Secrets applicatifs ecrits dans `infra/.env` :
+
+- `OPENAI_API_KEY`
+- `DEEPGRAM_API_KEY`
+- `LLM_API_KEY`
+- `CARTESIA_API_KEY`
+- `CARTESIA_VOICE_ID`
+- `ELEVENLABS_API_KEY`
+- `ELEVENLABS_VOICE_ID`
+- `POSTGRES_USER`
+- `POSTGRES_PASSWORD`
+- `POSTGRES_DB`
+- `AUTH_SECRET`
+- `JWT_SECRET`
+
+Valeurs hardcodees dans le workflow :
+
+- `LLM_BASE_URL=https://api.groq.com/openai/v1`
+- `LLM_MODEL=llama-3.1-8b-instant`
+- `TTS_PROVIDER=cartesia`
+
+## Commandes utiles
+
+Logs staging si les scripts sont lances manuellement dans un terminal ou un tmux :
+
+```bash
+cd ~/Nidalheim-staging/services/api-game && ./start-staging.sh
+cd ~/Nidalheim-staging/services/api-auth && ./start-staging.sh
+cd ~/Nidalheim-staging/services/site && ./start-staging.sh
+cd ~/Nidalheim-staging/services/docs && ./start-staging.sh
+```
+
+Option systemd staging :
+
+```bash
+cd ~/Nidalheim-staging/infra
+./setup-staging-systemd.sh
+systemctl --user restart nidalheim-api-game-staging.service
+```
+
+Relancer le workflow sans push :
+
+```bash
+gh workflow run deploy.yml --ref main
+gh workflow run deploy.yml --ref staging
+```
+
+## Limites et ameliorations
+
+- Pas encore de job `check` avant deploy : ajouter lint/typecheck/build pour bloquer les deploys cassants.
+- Pas encore de healthcheck post-deploy : ajouter des `curl` sur les 8 domaines prod/staging.
+- La staging ne restart pas les scripts automatiquement : les watchers doivent etre lances depuis `~/Nidalheim-staging`.
+- La staging partage le meme Postgres physique que la prod : la base est separee, mais il faudra des backups et une vigilance sur les migrations destructives.

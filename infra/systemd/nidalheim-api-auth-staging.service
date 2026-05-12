@@ -5,8 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/ubuntu/Nidalheim/services/api-auth
-ExecStart=/home/ubuntu/Nidalheim/services/api-auth/start-staging.sh
+WorkingDirectory=/home/ubuntu/Nidalheim-staging/services/api-auth
+Environment=NIDALHEIM_ROOT=/home/ubuntu/Nidalheim-staging
+ExecStart=/home/ubuntu/Nidalheim-staging/services/api-auth/start-staging.sh
 Restart=on-failure
 RestartSec=5
 StartLimitIntervalSec=60
