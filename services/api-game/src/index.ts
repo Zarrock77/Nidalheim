@@ -1,34 +1,22 @@
 import WebSocket, { WebSocketServer } from "ws";
 import OpenAI from "openai";
 import http from "http";
-import jwt from "jsonwebtoken";
 import { config } from "dotenv";
 import type { IncomingMessage } from "http";
 import type { Duplex } from "stream";
 import { AudioPipeline } from "./audioPipeline.js";
+import { assertJwtSecretConfigured, userFromJwtPayload, verifyToken } from "./auth.js";
 import { ConversationStore } from "./conversationStore.js";
+import { HttpRouter, sendJson } from "./httpRouter.js";
 import { getNpc } from "./npcStore.js";
+import { QuestGenerator } from "./questGenerator.js";
+import { registerQuestRoutes } from "./questRoutes.js";
+import { QuestStore } from "./questStore.js";
 import type { AuthenticatedUser, ChatMessage, Npc } from "./types.js";
 
 config({ path: "../../infra/.env" });
 
-const JWT_SECRET = process.env.JWT_SECRET;
-
-if (!JWT_SECRET) {
-  throw new Error("JWT_SECRET is required");
-}
-
-interface JWTPayload {
-  sub: string;
-  username: string;
-  role: string;
-  iat?: number;
-  exp?: number;
-}
-
-function verifyToken(token: string): JWTPayload {
-  return jwt.verify(token, JWT_SECRET as string, { algorithms: ["HS256"] }) as JWTPayload;
-}
+assertJwtSecretConfigured();
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
@@ -45,13 +33,23 @@ function startHeartbeat(ws: WebSocket): void {
   }, 30000);
 }
 
+interface TextConnectionDeps {
+  questGenerator: QuestGenerator;
+  questStore: QuestStore;
+}
+
 const textChatClient = new OpenAI({
   apiKey: process.env.LLM_API_KEY || OPENAI_API_KEY,
   baseURL: process.env.LLM_BASE_URL || undefined,
 });
 const textChatModel = process.env.LLM_MODEL || "llama-3.1-8b-instant";
 
-async function handleTextConnection(websocket: WebSocket, user: AuthenticatedUser, npc: Npc): Promise<void> {
+async function handleTextConnection(
+  websocket: WebSocket,
+  user: AuthenticatedUser,
+  npc: Npc,
+  deps: TextConnectionDeps,
+): Promise<void> {
   console.log(`Client connected to text endpoint (user: ${user.username}, npc: ${npc.id})`);
   startHeartbeat(websocket);
 
@@ -99,6 +97,12 @@ async function handleTextConnection(websocket: WebSocket, user: AuthenticatedUse
     console.log(`[text ${user.username}/${npc.id}] npc: ${reply}`);
     websocket.send(reply);
 
+    if (shouldOfferQuest(userText)) {
+      void offerQuestFromText(websocket, user, npc, deps, userText, reply).catch((err) => {
+        console.error(`[text ${user.username}/${npc.id}] quest offer failed:`, (err as Error)?.message ?? err);
+      });
+    }
+
     store
       .appendTurn(user.id, npc.id, userText, reply, "text")
       .catch((err) => console.error(`[text ${user.username}/${npc.id}] save failed:`, (err as Error)?.message ?? err));
@@ -111,6 +115,34 @@ async function handleTextConnection(websocket: WebSocket, user: AuthenticatedUse
   websocket.on("error", (error) => {
     console.log(`Text WebSocket error: ${error}`);
   });
+}
+
+function shouldOfferQuest(userText: string): boolean {
+  return /\b(qu[eê]te|quest|mission)\b/i.test(userText);
+}
+
+async function offerQuestFromText(
+  websocket: WebSocket,
+  user: AuthenticatedUser,
+  npc: Npc,
+  deps: TextConnectionDeps,
+  userText: string,
+  npcReply: string,
+): Promise<void> {
+  const quest = await deps.questGenerator.generateStructuredQuest({
+    user,
+    issuerNpcId: npc.id,
+    context: {
+      location: npc.id,
+      recentEvents: [userText, npcReply],
+    },
+  });
+
+  await deps.questStore.createOffered(user.id, quest, npc.id);
+
+  if (websocket.readyState === WebSocket.OPEN) {
+    websocket.send(JSON.stringify({ type: "quest_offer", payload: quest }));
+  }
 }
 
 function handleAudioConnection(clientWs: WebSocket, user: AuthenticatedUser, npc: Npc): void {
@@ -181,11 +213,35 @@ function handleAudioConnection(clientWs: WebSocket, user: AuthenticatedUser, npc
 }
 
 function main(): void {
+  const questGenerator = new QuestGenerator();
+  const questStore = new QuestStore();
+  const router = new HttpRouter();
+
+  router.get("/health", (context) => {
+    sendJson(context.response, 200, { status: "ok", service: "nidalheim-game" });
+  });
+  registerQuestRoutes(router, { questGenerator, questStore });
+
   const server = http.createServer((req, res) => {
     const ip = req.socket.remoteAddress;
-    console.log(`[http ${ip}] ${req.method} ${req.url} — not a WebSocket upgrade, rejecting`);
-    res.writeHead(426, { "Content-Type": "text/plain", "Upgrade": "websocket" });
-    res.end("Upgrade Required");
+    void router.handle(req, res).then((handled) => {
+      if (handled) return;
+
+      const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+      if (url.pathname === "/text" || url.pathname === "/audio") {
+        console.log(`[http ${ip}] ${req.method} ${req.url} - not a WebSocket upgrade, rejecting`);
+        res.writeHead(426, { "Content-Type": "text/plain", "Upgrade": "websocket" });
+        res.end("Upgrade Required");
+        return;
+      }
+
+      sendJson(res, 404, { error: "Not Found" });
+    }).catch((err) => {
+      console.error("[http] request failed:", err);
+      if (!res.headersSent) {
+        sendJson(res, 500, { error: "Internal Server Error" });
+      }
+    });
   });
 
   const wss = new WebSocketServer({ noServer: true });
@@ -208,7 +264,7 @@ function main(): void {
     }
 
     const tokenPreview = `${token.slice(0, 12)}…${token.slice(-6)}`;
-    let payload: JWTPayload;
+    let payload: ReturnType<typeof verifyToken>;
     try {
       payload = verifyToken(token);
     } catch (err) {
@@ -217,14 +273,7 @@ function main(): void {
       return;
     }
 
-    const user: AuthenticatedUser = {
-      id: payload.sub,
-      sub: payload.sub,
-      username: payload.username,
-      role: payload.role,
-      iat: payload.iat,
-      exp: payload.exp,
-    };
+    const user = userFromJwtPayload(payload);
 
     let npc: Npc;
     try {
@@ -239,7 +288,7 @@ function main(): void {
 
     if (path === "/text") {
       wss.handleUpgrade(request, socket, head, (ws) => {
-        void handleTextConnection(ws, user, npc);
+        void handleTextConnection(ws, user, npc, { questGenerator, questStore });
       });
     } else if (path === "/audio") {
       wss.handleUpgrade(request, socket, head, (ws) => {
