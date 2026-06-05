@@ -2,11 +2,18 @@ import IORedis from 'ioredis';
 
 const Redis = IORedis.default ?? IORedis;
 const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
-  maxRetriesPerRequest: 3,
+  // Never stop reconnecting. If Redis is recreated (new IP) or restarted, ioredis
+  // keeps retrying with a capped backoff and re-resolves the `redis` hostname on
+  // each attempt, so it recovers the new IP on its own. (Previously this returned
+  // null after 3 attempts, which made ioredis give up permanently: a Redis restart
+  // then left auth unable to read/write device codes until api-auth was manually
+  // restarted.)
   retryStrategy(times: number) {
-    if (times > 3) return null;
-    return Math.min(times * 200, 2000);
+    return Math.min(times * 200, 5000);
   },
+  // While Redis is unreachable, queue commands and replay them once reconnected
+  // instead of failing them after 3 retries.
+  maxRetriesPerRequest: null,
 });
 
 redis.on('error', (err: Error) => {

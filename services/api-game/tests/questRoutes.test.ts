@@ -13,8 +13,8 @@ function makeQuest(overrides: Partial<QuestData> = {}): QuestData {
     questId: "q_test",
     kind: "structured",
     evaluationStrategy: "client",
-    title: "Les crocs dans la brume",
-    summary: "Des loups des glaces rodent pres du village.",
+    title: "Bois pour le foyer",
+    summary: "Le village manque de bois sec avant la tombee de la nuit.",
     issuer: { type: "board" },
     rewards: { xp: 120, items: [] },
     stages: [
@@ -24,9 +24,9 @@ function makeQuest(overrides: Partial<QuestData> = {}): QuestData {
         objectives: [
           {
             objectiveId: "o1",
-            type: "Kill",
-            params: { targetTag: "Enemy.Wolf.Frost", count: 3 },
-            displayText: "Abattre 3 loups des glaces",
+            type: "Collect",
+            params: { itemTag: "Item.Resource.Wood", count: 5 },
+            displayText: "Rapporter 5 morceaux de bois",
           },
         ],
         completion: { mode: "all" },
