@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { authenticateUser } from '../services/user.js';
 import { signAccessToken, signRefreshToken } from '../services/jwt.js';
-import { storeRefreshToken } from '../services/redis.js';
+import { storeRefreshToken } from '../services/sessions.js';
 import { v4 as uuidv4 } from 'uuid';
 
 const router = Router();

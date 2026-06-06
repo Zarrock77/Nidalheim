@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { verifyToken, RefreshTokenPayload } from '../services/jwt.js';
-import { revokeRefreshToken } from '../services/redis.js';
+import { revokeRefreshToken } from '../services/sessions.js';
 
 const router = Router();
 
