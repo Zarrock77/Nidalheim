@@ -9,7 +9,7 @@ import {
   getDeviceByUserCode,
 } from '../services/devices.js';
 import { signAccessToken, signRefreshToken, verifyToken, AccessTokenPayload } from '../services/jwt.js';
-import { storeRefreshToken } from '../services/redis.js';
+import { storeRefreshToken } from '../services/sessions.js';
 import { getUserById } from '../services/user.js';
 
 const router = Router();

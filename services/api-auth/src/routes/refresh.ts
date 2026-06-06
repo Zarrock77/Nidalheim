@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { verifyToken, signAccessToken, signRefreshToken, RefreshTokenPayload } from '../services/jwt.js';
-import { isRefreshTokenValid, revokeRefreshToken, storeRefreshToken } from '../services/redis.js';
+import { isRefreshTokenValid, revokeRefreshToken, storeRefreshToken } from '../services/sessions.js';
 import { getUserById } from '../services/user.js';
 import { v4 as uuidv4 } from 'uuid';
 
