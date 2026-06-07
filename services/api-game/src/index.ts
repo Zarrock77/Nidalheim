@@ -1,5 +1,4 @@
 import WebSocket, { WebSocketServer } from "ws";
-import OpenAI from "openai";
 import http from "http";
 import { config } from "dotenv";
 import type { IncomingMessage } from "http";
@@ -9,6 +8,8 @@ import { assertJwtSecretConfigured, userFromJwtPayload, verifyToken } from "./au
 import { ConversationStore } from "./conversationStore.js";
 import { HttpRouter, sendJson } from "./httpRouter.js";
 import { getNpc } from "./npcStore.js";
+import { ChatEngine } from "./providers/chatEngine.js";
+import { buildSystemPrompt } from "./systemPrompt.js";
 import { QuestGenerator } from "./questGenerator.js";
 import { registerQuestRoutes } from "./questRoutes.js";
 import { QuestStore } from "./questStore.js";
@@ -38,11 +39,14 @@ interface TextConnectionDeps {
   questStore: QuestStore;
 }
 
-const textChatClient = new OpenAI({
-  apiKey: process.env.LLM_API_KEY || OPENAI_API_KEY,
-  baseURL: process.env.LLM_BASE_URL || undefined,
+// Moteur de chat unifie texte + vocal : Groq en primaire, OpenAI en fallback.
+const chatEngine = new ChatEngine({
+  groqApiKey: process.env.LLM_API_KEY,
+  groqBaseUrl: process.env.LLM_BASE_URL,
+  groqModel: process.env.LLM_MODEL || "llama-3.1-8b-instant",
+  openaiApiKey: OPENAI_API_KEY,
+  openaiModel: process.env.OPENAI_FALLBACK_MODEL || "gpt-4o-mini",
 });
-const textChatModel = process.env.LLM_MODEL || "llama-3.1-8b-instant";
 
 async function handleTextConnection(
   websocket: WebSocket,
@@ -54,45 +58,34 @@ async function handleTextConnection(
   startHeartbeat(websocket);
 
   const store = new ConversationStore({ maxHistory: 20 });
-  let history: ChatMessage[] = [];
-  try {
-    history = await store.loadRecent(user.id, npc.id);
-    if (history.length > 0) {
-      console.log(`[text ${user.username}/${npc.id}] restored ${history.length} past messages`);
-    }
-  } catch (err) {
-    console.error(`[text ${user.username}/${npc.id}] history load failed:`, (err as Error)?.message ?? err);
-  }
-
-  const model = npc.llmModel || textChatModel;
 
   websocket.on("message", async (message) => {
     const userText = message.toString().trim();
     if (!userText) return;
     console.log(`[text ${user.username}/${npc.id}] user: ${userText}`);
 
-    history.push({ role: "user", content: userText });
+    // Recharge l'historique partage a CHAQUE tour -> sync live vocal<->texte.
+    let history: ChatMessage[] = [];
+    try {
+      history = await store.loadRecent(user.id, npc.id);
+    } catch (err) {
+      console.error(`[text ${user.username}/${npc.id}] history load failed:`, (err as Error)?.message ?? err);
+    }
+
     const messages = [
-      { role: "system" as const, content: withQuestChatPolicy(npc.systemPrompt) },
+      { role: "system" as const, content: buildSystemPrompt(npc) },
       ...history,
+      { role: "user" as const, content: userText },
     ];
 
     let reply: string;
     try {
-      const response = await textChatClient.chat.completions.create({
-        model,
-        messages,
-      });
-      reply = response.choices[0]?.message?.content ?? "";
+      reply = await chatEngine.respond(messages, { model: npc.llmModel ?? undefined });
     } catch (err) {
       console.error(`[text ${user.username}/${npc.id}] LLM error:`, (err as Error)?.message ?? err);
       websocket.send("Error generating response.");
-      history.pop();
       return;
     }
-
-    history.push({ role: "assistant", content: reply });
-    if (history.length > 40) history.splice(0, history.length - 40);
 
     console.log(`[text ${user.username}/${npc.id}] npc: ${reply}`);
     websocket.send(reply);
@@ -115,18 +108,6 @@ async function handleTextConnection(
   websocket.on("error", (error) => {
     console.log(`Text WebSocket error: ${error}`);
   });
-}
-
-function withQuestChatPolicy(systemPrompt: string): string {
-  return [
-    systemPrompt,
-    "",
-    "Regle quetes MVP:",
-    "- Si proposer ou imposer une quete est coherent avec la conversation, fais-le naturellement dans ta reponse.",
-    "- Pour ce MVP, ne propose que des quetes de collecte: ramasser, rapporter, trouver ou recolter des objets.",
-    "- Ne decris pas de quete de combat, d'assassinat, d'escorte, de voyage obligatoire ou d'utilisation de competence.",
-    "- N'ecris jamais de JSON ou de balise technique dans le chat joueur.",
-  ].join("\n");
 }
 
 function shouldOfferQuest(userText: string, npcReply: string): boolean {
