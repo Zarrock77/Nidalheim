@@ -2,6 +2,10 @@ import OpenAI from "openai";
 
 export type ChatPromptMessage = { role: "system" | "user" | "assistant"; content: string };
 
+type SdkMessage = OpenAI.Chat.Completions.ChatCompletionMessageParam;
+type SdkTool = OpenAI.Chat.Completions.ChatCompletionTool;
+type SdkToolCall = OpenAI.Chat.Completions.ChatCompletionMessageToolCall;
+
 export interface ChatEngineConfig {
   groqApiKey?: string | null;
   groqBaseUrl?: string;
@@ -16,13 +20,20 @@ export interface ChatRespondOptions {
   /** Streaming token par token (utilise par la voie vocale pour alimenter le TTS). */
   stream?: boolean;
   onDelta?: (delta: string) => void;
+  /** Tools (function-calling) exposes au LLM. */
+  tools?: SdkTool[];
+  /** Appele quand le LLM invoque un tool ; retourne le resultat (string) renvoye au LLM. */
+  onToolCall?: (name: string, argumentsJson: string) => Promise<string> | string;
 }
+
+const MAX_TOOL_ROUNDS = 4;
 
 /**
  * Moteur de chat unifie pour le texte ET le vocal.
  * Groq en primaire, bascule sur OpenAI si Groq echoue (cle absente, erreur, rate-limit).
+ * Gere le function-calling (tools) avec boucle d'appel + accumulation des tool_calls en streaming.
  *
- * En streaming : si Groq lache APRES avoir deja emis des tokens, on ne rebascule PAS sur OpenAI
+ * En streaming : si Groq lache APRES avoir deja emis du texte, on ne rebascule PAS sur OpenAI
  * (sinon le TTS recevrait la reponse en double) — on remonte l'erreur.
  */
 export class ChatEngine {
@@ -55,7 +66,7 @@ export class ChatEngine {
         ? (d: string) => { emittedAny = true; opts.onDelta!(d); }
         : undefined;
       try {
-        return await this._call(p.client, p.model, messages, opts.stream === true, onDelta);
+        return await this._runConversation(p.client, p.model, messages, opts, onDelta);
       } catch (err) {
         lastErr = err;
         if (emittedAny) {
@@ -68,26 +79,80 @@ export class ChatEngine {
     throw lastErr ?? new Error("ChatEngine: tous les providers ont echoue");
   }
 
-  private async _call(
+  /** Boucle conversationnelle : appelle le LLM, execute les tools demandes, recommence jusqu'a une reponse texte. */
+  private async _runConversation(
     client: OpenAI,
     model: string,
-    messages: ChatPromptMessage[],
-    stream: boolean,
+    baseMessages: ChatPromptMessage[],
+    opts: ChatRespondOptions,
     onDelta?: (delta: string) => void,
   ): Promise<string> {
-    const sdkMessages = messages as OpenAI.Chat.Completions.ChatCompletionMessageParam[];
-    if (stream) {
-      const s = await client.chat.completions.create({ model, messages: sdkMessages, stream: true });
-      let full = "";
-      for await (const chunk of s) {
-        const delta = chunk.choices?.[0]?.delta?.content ?? "";
-        if (!delta) continue;
-        full += delta;
-        try { onDelta?.(delta); } catch { /* swallow listener errors */ }
+    const msgs: SdkMessage[] = baseMessages.map((m) => ({ role: m.role, content: m.content }));
+    const useTools = !!(opts.tools && opts.tools.length && opts.onToolCall);
+    const maxRounds = useTools ? MAX_TOOL_ROUNDS : 1;
+
+    // Accumule le texte de TOUS les tours -> reste coherent avec ce qui a ete streame au TTS
+    // (le modele peut narrer un peu avant d'appeler le tool, puis confirmer apres).
+    let finalText = "";
+    for (let round = 0; round < maxRounds; round++) {
+      // Au dernier tour, on retire les tools pour forcer une reponse texte (anti-boucle).
+      const tools = useTools && round < maxRounds - 1 ? opts.tools : undefined;
+      const { text, toolCalls } = await this._callOnce(client, model, msgs, tools, opts.stream === true, onDelta);
+      finalText += text;
+
+      if (toolCalls.length && opts.onToolCall) {
+        msgs.push({ role: "assistant", content: text || null, tool_calls: toolCalls });
+        for (const tc of toolCalls) {
+          if (tc.type !== "function") continue;
+          let result = "ok";
+          try {
+            result = await opts.onToolCall(tc.function.name, tc.function.arguments);
+          } catch (err) {
+            result = `error: ${(err as Error)?.message ?? err}`;
+          }
+          msgs.push({ role: "tool", tool_call_id: tc.id, content: result });
+        }
+        continue;
       }
-      return full;
+      return finalText;
     }
-    const res = await client.chat.completions.create({ model, messages: sdkMessages });
-    return res.choices[0]?.message?.content ?? "";
+    return finalText;
+  }
+
+  private async _callOnce(
+    client: OpenAI,
+    model: string,
+    msgs: SdkMessage[],
+    tools: SdkTool[] | undefined,
+    stream: boolean,
+    onDelta?: (delta: string) => void,
+  ): Promise<{ text: string; toolCalls: SdkToolCall[] }> {
+    if (stream) {
+      const s = await client.chat.completions.create({ model, messages: msgs, tools, stream: true });
+      let full = "";
+      const acc: Record<number, { id: string; name: string; args: string }> = {};
+      for await (const chunk of s) {
+        const delta = chunk.choices?.[0]?.delta;
+        if (delta?.content) {
+          full += delta.content;
+          try { onDelta?.(delta.content); } catch { /* swallow listener errors */ }
+        }
+        for (const tc of delta?.tool_calls ?? []) {
+          const i = tc.index ?? 0;
+          const a = (acc[i] ??= { id: "", name: "", args: "" });
+          if (tc.id) a.id = tc.id;
+          if (tc.function?.name) a.name += tc.function.name;
+          if (tc.function?.arguments) a.args += tc.function.arguments;
+        }
+      }
+      const toolCalls: SdkToolCall[] = Object.values(acc)
+        .filter((a) => a.name)
+        .map((a) => ({ id: a.id, type: "function", function: { name: a.name, arguments: a.args } }));
+      return { text: full, toolCalls };
+    }
+
+    const res = await client.chat.completions.create({ model, messages: msgs, tools });
+    const m = res.choices[0]?.message;
+    return { text: m?.content ?? "", toolCalls: (m?.tool_calls ?? []) as SdkToolCall[] };
   }
 }

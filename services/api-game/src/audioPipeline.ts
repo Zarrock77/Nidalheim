@@ -7,6 +7,8 @@ import { CartesiaStreamingTTS } from "./providers/cartesia.js";
 import { ChatEngine } from "./providers/chatEngine.js";
 import { buildSystemPrompt } from "./systemPrompt.js";
 import { ConversationStore } from "./conversationStore.js";
+import { QuestStore } from "./questStore.js";
+import { QUEST_NEXT_TOOL, buildFirstCombatQuest } from "./questCatalog.js";
 import type { AuthenticatedUser, ChatMessage, Npc } from "./types.js";
 
 const KEEPALIVE_INTERVAL_MS = 8000;
@@ -82,6 +84,7 @@ export class AudioPipeline {
   private readonly engine: ChatEngine;
   private readonly ttsRoute: TTSRoute;
   private readonly conversationStore: ConversationStore;
+  private readonly questStore: QuestStore;
 
   private utteranceInFlight = false;
   private pendingTranscript = "";
@@ -110,6 +113,7 @@ export class AudioPipeline {
     });
     this.ttsRoute = makeTTS(config);
     this.conversationStore = new ConversationStore({ maxHistory: 20 });
+    this.questStore = new QuestStore();
   }
 
   async start(): Promise<void> {
@@ -300,8 +304,18 @@ export class AudioPipeline {
 
     try {
       const full = await this.engine.respond(messages, {
-        model: this.npc.llmModel ?? undefined,
         stream: true,
+        tools: [QUEST_NEXT_TOOL],
+        onToolCall: async (name) => {
+          if (name === "quest_next") {
+            const quest = buildFirstCombatQuest(this.npc.id);
+            await this.questStore.createOffered(this.user.id, quest, this.npc.id);
+            this._send({ type: "quest_offer", payload: quest });
+            console.log(`[pipeline ${this.user.username}/${this.npc.id}] quest_next -> ${quest.questId}`);
+            return "Quete de defense du village lancee et envoyee au joueur. Confirme-lui d'aller dans la foret.";
+          }
+          return `tool inconnu: ${name}`;
+        },
         onDelta: (delta) => {
           if (!firstTokenAt) {
             firstTokenAt = Date.now();

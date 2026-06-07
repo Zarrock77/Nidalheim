@@ -10,6 +10,7 @@ import { HttpRouter, sendJson } from "./httpRouter.js";
 import { getNpc } from "./npcStore.js";
 import { ChatEngine } from "./providers/chatEngine.js";
 import { buildSystemPrompt } from "./systemPrompt.js";
+import { QUEST_NEXT_TOOL, buildFirstCombatQuest } from "./questCatalog.js";
 import { QuestGenerator } from "./questGenerator.js";
 import { registerQuestRoutes } from "./questRoutes.js";
 import { QuestStore } from "./questStore.js";
@@ -40,10 +41,11 @@ interface TextConnectionDeps {
 }
 
 // Moteur de chat unifie texte + vocal : Groq en primaire, OpenAI en fallback.
+// Modele dedie au chat (function-calling fiable) — distinct du LLM_MODEL du generateur de quetes.
 const chatEngine = new ChatEngine({
   groqApiKey: process.env.LLM_API_KEY,
   groqBaseUrl: process.env.LLM_BASE_URL,
-  groqModel: process.env.LLM_MODEL || "llama-3.1-8b-instant",
+  groqModel: process.env.CHAT_LLM_MODEL || "llama-3.3-70b-versatile",
   openaiApiKey: OPENAI_API_KEY,
   openaiModel: process.env.OPENAI_FALLBACK_MODEL || "gpt-4o-mini",
 });
@@ -80,7 +82,21 @@ async function handleTextConnection(
 
     let reply: string;
     try {
-      reply = await chatEngine.respond(messages, { model: npc.llmModel ?? undefined });
+      reply = await chatEngine.respond(messages, {
+        tools: [QUEST_NEXT_TOOL],
+        onToolCall: async (name) => {
+          if (name === "quest_next") {
+            const quest = buildFirstCombatQuest(npc.id);
+            await deps.questStore.createOffered(user.id, quest, npc.id);
+            if (websocket.readyState === WebSocket.OPEN) {
+              websocket.send(JSON.stringify({ type: "quest_offer", payload: quest }));
+            }
+            console.log(`[text ${user.username}/${npc.id}] quest_next -> ${quest.questId}`);
+            return "Quete de defense du village lancee et envoyee au joueur. Confirme-lui d'aller dans la foret.";
+          }
+          return `tool inconnu: ${name}`;
+        },
+      });
     } catch (err) {
       console.error(`[text ${user.username}/${npc.id}] LLM error:`, (err as Error)?.message ?? err);
       websocket.send("Error generating response.");
@@ -89,12 +105,6 @@ async function handleTextConnection(
 
     console.log(`[text ${user.username}/${npc.id}] npc: ${reply}`);
     websocket.send(reply);
-
-    if (shouldOfferQuest(userText, reply)) {
-      void offerQuestFromText(websocket, user, npc, deps, userText, reply).catch((err) => {
-        console.error(`[text ${user.username}/${npc.id}] quest offer failed:`, (err as Error)?.message ?? err);
-      });
-    }
 
     store
       .appendTurn(user.id, npc.id, userText, reply, "text")
@@ -170,7 +180,7 @@ function handleAudioConnection(clientWs: WebSocket, user: AuthenticatedUser, npc
 
     openaiKey: OPENAI_API_KEY,
     llmApiKey: process.env.LLM_API_KEY || process.env.GROQ_API_KEY,
-    llmModel: npc.llmModel || process.env.LLM_MODEL || "llama-3.3-70b-versatile",
+    llmModel: process.env.CHAT_LLM_MODEL || "llama-3.3-70b-versatile",
     llmBaseUrl: process.env.LLM_BASE_URL || "https://api.groq.com/openai/v1",
   });
 
