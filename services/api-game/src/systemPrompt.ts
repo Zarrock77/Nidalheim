@@ -21,6 +21,7 @@ export function buildSystemPrompt(npc: Npc, questState: QuestChatState): string 
       lines.push(
         "Le joueur a DEJA recu la mission de defense du village (repousser les pilleurs dans la foret) : elle est en cours.",
         "Ne lui propose PAS de nouvelle mission et ne relance jamais celle-ci.",
+        "Reponds TOUJOURS d'abord a ce que le joueur te dit ; ne ramene pas la conversation a la mission s'il ne t'en parle pas.",
         "S'il te parle de la mission, rappelle-lui simplement l'objectif : les pilleurs sont dans la foret, plus loin entre les arbres.",
         "Pour tout le reste, converse normalement, en restant dans ton role et en variant tes reponses.",
       );
@@ -35,10 +36,12 @@ export function buildSystemPrompt(npc: Npc, questState: QuestChatState): string 
       break;
     case "none":
       lines.push(
-        "Mission disponible que tu peux confier au joueur :",
+        "Mission que tu peux confier au joueur s'il se montre volontaire :",
         FIRST_QUEST_DESCRIPTION,
-        "Si le joueur demande une mission/quete, ou si c'est coherent avec la conversation, propose-lui cette mission de defense.",
-        "Quand le joueur l'accepte (ou si tu decides de la lui confier), appelle l'outil 'quest_next' pour la lancer, puis confirme-lui en une phrase qu'il doit filer dans la foret, plus loin entre les arbres.",
+        "Reponds TOUJOURS d'abord a ce que le joueur te dit ; ne ramene pas chaque sujet a cette mission.",
+        "Tu peux evoquer ton inquietude au sujet des pilleurs quand c'est naturel, sans insister a chaque message.",
+        "N'appelle l'outil 'quest_next' QUE si le joueur demande une mission/quete ou accepte explicitement d'aider contre les pilleurs — jamais de ta propre initiative.",
+        "Apres avoir appele l'outil, confirme en une phrase qu'il doit filer dans la foret, plus loin entre les arbres.",
       );
       break;
   }

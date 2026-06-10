@@ -43,8 +43,9 @@ export const QUEST_NEXT_TOOL: OpenAI.Chat.Completions.ChatCompletionTool = {
   function: {
     name: "quest_next",
     description:
-      "Lance/offre la prochaine quete au joueur (la mission de defense du village contre les pilleurs). " +
-      "A appeler quand le joueur demande/accepte une mission, ou quand tu decides naturellement de la lui confier.",
+      "Lance la mission de defense du village contre les pilleurs et l'affiche chez le joueur. " +
+      "A appeler UNIQUEMENT quand le joueur demande une mission/quete ou accepte explicitement d'aider. " +
+      "Ne l'appelle jamais de ta propre initiative.",
     parameters: { type: "object", properties: {}, required: [] },
   },
 };
