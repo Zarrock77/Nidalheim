@@ -14,6 +14,9 @@ interface QuestIdRow {
   id: string;
 }
 
+/** Etat agrege des quetes d'un joueur, du point de vue du dialogue PNJ. */
+export type QuestChatState = "none" | "open" | "done";
+
 export class QuestStore {
   async createOffered(userId: string, questData: QuestData, locationId: string | null = null): Promise<QuestRecord> {
     const pool = getPool();
@@ -32,6 +35,31 @@ export class QuestStore {
       throw new Error(`QuestStore.createOffered: failed to load quest ${questData.questId} after conflict`);
     }
     return existing;
+  }
+
+  /** Vrai si le joueur a deja une quete en cours (offerte ou acceptee) — empeche le PNJ de la re-proposer. */
+  async hasOpenQuest(userId: string): Promise<boolean> {
+    const pool = getPool();
+    const { rows } = await pool.query(
+      `SELECT 1 FROM quests WHERE user_id = $1 AND status IN ('offered', 'accepted') LIMIT 1`,
+      [userId],
+    );
+    return rows.length > 0;
+  }
+
+  /** Etat de quete vu du dialogue PNJ : 'open' (en cours), 'done' (deja accomplie), 'none' (rien). */
+  async getQuestChatState(userId: string): Promise<QuestChatState> {
+    const pool = getPool();
+    const { rows } = await pool.query<{ has_open: boolean | null; has_done: boolean | null }>(
+      `SELECT bool_or(status IN ('offered', 'accepted')) AS has_open,
+              bool_or(status = 'completed') AS has_done
+         FROM quests
+        WHERE user_id = $1`,
+      [userId],
+    );
+    if (rows[0]?.has_open) return "open";
+    if (rows[0]?.has_done) return "done";
+    return "none";
   }
 
   async listOffered(userId: string, locationId: string | null, limit = 5): Promise<QuestRecord[]> {

@@ -7,8 +7,9 @@ import { CartesiaStreamingTTS } from "./providers/cartesia.js";
 import { ChatEngine } from "./providers/chatEngine.js";
 import { buildSystemPrompt } from "./systemPrompt.js";
 import { ConversationStore } from "./conversationStore.js";
-import { QuestStore } from "./questStore.js";
-import { QUEST_NEXT_TOOL, buildFirstCombatQuest } from "./questCatalog.js";
+import { QuestStore, type QuestChatState } from "./questStore.js";
+import { QUEST_NEXT_TOOL } from "./questCatalog.js";
+import { tryLaunchFirstQuest } from "./questLaunch.js";
 import type { AuthenticatedUser, ChatMessage, Npc } from "./types.js";
 
 const KEEPALIVE_INTERVAL_MS = 8000;
@@ -296,8 +297,16 @@ export class AudioPipeline {
     } catch (err) {
       console.error(`[pipeline ${this.user.username}/${this.npc.id}] history load failed:`, (err as Error)?.message ?? err);
     }
+    // Etat de quete recharge a CHAQUE tour : pilote la variante de prompt et l'exposition du tool.
+    let questState: QuestChatState = "none";
+    try {
+      questState = await this.questStore.getQuestChatState(this.user.id);
+    } catch (err) {
+      console.error(`[pipeline ${this.user.username}/${this.npc.id}] quest state load failed:`, (err as Error)?.message ?? err);
+    }
+
     const messages = [
-      { role: "system" as const, content: buildSystemPrompt(this.npc) },
+      { role: "system" as const, content: buildSystemPrompt(this.npc, questState) },
       ...history,
       { role: "user" as const, content: userText },
     ];
@@ -305,11 +314,13 @@ export class AudioPipeline {
     try {
       const full = await this.engine.respond(messages, {
         stream: true,
-        tools: [QUEST_NEXT_TOOL],
+        tools: questState === "none" ? [QUEST_NEXT_TOOL] : [],
         onToolCall: async (name) => {
           if (name === "quest_next") {
-            const quest = buildFirstCombatQuest(this.npc.id);
-            await this.questStore.createOffered(this.user.id, quest, this.npc.id);
+            const quest = await tryLaunchFirstQuest(this.questStore, this.user.id, this.npc.id);
+            if (!quest) {
+              return "Une quete est deja en cours pour ce joueur : n'en relance pas. Reponds normalement.";
+            }
             this._send({ type: "quest_offer", payload: quest });
             console.log(`[pipeline ${this.user.username}/${this.npc.id}] quest_next -> ${quest.questId}`);
             return "Quete de defense du village lancee et envoyee au joueur. Confirme-lui d'aller dans la foret.";

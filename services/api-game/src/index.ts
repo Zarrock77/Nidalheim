@@ -10,10 +10,11 @@ import { HttpRouter, sendJson } from "./httpRouter.js";
 import { getNpc } from "./npcStore.js";
 import { ChatEngine } from "./providers/chatEngine.js";
 import { buildSystemPrompt } from "./systemPrompt.js";
-import { QUEST_NEXT_TOOL, buildFirstCombatQuest } from "./questCatalog.js";
+import { QUEST_NEXT_TOOL } from "./questCatalog.js";
 import { QuestGenerator } from "./questGenerator.js";
+import { tryLaunchFirstQuest } from "./questLaunch.js";
 import { registerQuestRoutes } from "./questRoutes.js";
-import { QuestStore } from "./questStore.js";
+import { QuestStore, type QuestChatState } from "./questStore.js";
 import type { AuthenticatedUser, ChatMessage, Npc } from "./types.js";
 
 config({ path: "../../infra/.env" });
@@ -36,7 +37,6 @@ function startHeartbeat(ws: WebSocket): void {
 }
 
 interface TextConnectionDeps {
-  questGenerator: QuestGenerator;
   questStore: QuestStore;
 }
 
@@ -64,6 +64,11 @@ async function handleTextConnection(
   websocket.on("message", async (message) => {
     const userText = message.toString().trim();
     if (!userText) return;
+
+    // Messages de controle JSON du client (ex: quete terminee) — ne passent jamais par le LLM.
+    if (userText.startsWith("{") && await handleTextControlMessage(websocket, user, npc, deps, userText)) {
+      return;
+    }
     console.log(`[text ${user.username}/${npc.id}] user: ${userText}`);
 
     // Recharge l'historique partage a CHAQUE tour -> sync live vocal<->texte.
@@ -74,8 +79,16 @@ async function handleTextConnection(
       console.error(`[text ${user.username}/${npc.id}] history load failed:`, (err as Error)?.message ?? err);
     }
 
+    // Etat de quete recharge a CHAQUE tour : pilote la variante de prompt et l'exposition du tool.
+    let questState: QuestChatState = "none";
+    try {
+      questState = await deps.questStore.getQuestChatState(user.id);
+    } catch (err) {
+      console.error(`[text ${user.username}/${npc.id}] quest state load failed:`, (err as Error)?.message ?? err);
+    }
+
     const messages = [
-      { role: "system" as const, content: buildSystemPrompt(npc) },
+      { role: "system" as const, content: buildSystemPrompt(npc, questState) },
       ...history,
       { role: "user" as const, content: userText },
     ];
@@ -83,11 +96,13 @@ async function handleTextConnection(
     let reply: string;
     try {
       reply = await chatEngine.respond(messages, {
-        tools: [QUEST_NEXT_TOOL],
+        tools: questState === "none" ? [QUEST_NEXT_TOOL] : [],
         onToolCall: async (name) => {
           if (name === "quest_next") {
-            const quest = buildFirstCombatQuest(npc.id);
-            await deps.questStore.createOffered(user.id, quest, npc.id);
+            const quest = await tryLaunchFirstQuest(deps.questStore, user.id, npc.id);
+            if (!quest) {
+              return "Une quete est deja en cours pour ce joueur : n'en relance pas. Reponds normalement.";
+            }
             if (websocket.readyState === WebSocket.OPEN) {
               websocket.send(JSON.stringify({ type: "quest_offer", payload: quest }));
             }
@@ -120,46 +135,42 @@ async function handleTextConnection(
   });
 }
 
-function shouldOfferQuest(userText: string, npcReply: string): boolean {
-  const user = normalizeForIntent(userText);
-  const reply = normalizeForIntent(npcReply);
-  const userAskedForQuest = /\b(quete|quest|mission|travail|service|aide)\b/i.test(user);
-  const npcProposedCollect =
-    /\b(ramasse|ramasser|rapporte|rapporter|apporte|apporter|collecte|collecter|recolte|recolter|rassemble|rassembler|trouve|trouver)\b/i.test(reply)
-    && /\b(bois|pierre|pierres|pomme|pommes|herbe|plante|minerai|fer|fragment|relique|rune|objet|materiau|ressource)\b/i.test(reply);
-
-  return userAskedForQuest || npcProposedCollect;
-}
-
-function normalizeForIntent(value: string): string {
-  return value
-    .normalize("NFD")
-    .replace(/\p{Diacritic}/gu, "")
-    .toLowerCase();
-}
-
-async function offerQuestFromText(
+/**
+ * Traite un message de controle JSON envoye par le client sur le canal texte
+ * (`{"type":"quest_complete","questId":"..."}` quand l'objectif est atteint en jeu).
+ * Retourne true si le message a ete consomme — il ne doit alors pas partir au LLM.
+ */
+async function handleTextControlMessage(
   websocket: WebSocket,
   user: AuthenticatedUser,
   npc: Npc,
   deps: TextConnectionDeps,
-  userText: string,
-  npcReply: string,
-): Promise<void> {
-  const quest = await deps.questGenerator.generateStructuredQuest({
-    user,
-    issuerNpcId: npc.id,
-    context: {
-      location: npc.id,
-      recentEvents: [userText, npcReply],
-    },
-  });
-
-  await deps.questStore.createOffered(user.id, quest, npc.id);
-
-  if (websocket.readyState === WebSocket.OPEN) {
-    websocket.send(JSON.stringify({ type: "quest_offer", payload: quest }));
+  raw: string,
+): Promise<boolean> {
+  let ctrl: { type?: unknown; questId?: unknown };
+  try {
+    ctrl = JSON.parse(raw) as { type?: unknown; questId?: unknown };
+  } catch {
+    return false; // pas du JSON valide -> message de chat normal
   }
+  if (typeof ctrl.type !== "string") return false;
+
+  if (ctrl.type === "quest_complete" && typeof ctrl.questId === "string") {
+    try {
+      const completed = await deps.questStore.completeQuest(user.id, ctrl.questId, { source: "client" });
+      console.log(`[text ${user.username}/${npc.id}] quest_complete ${ctrl.questId} -> ${completed ? completed.status : "not found"}`);
+      if (websocket.readyState === WebSocket.OPEN) {
+        websocket.send(JSON.stringify({ type: "quest_completed", questId: ctrl.questId, ok: !!completed }));
+      }
+    } catch (err) {
+      console.error(`[text ${user.username}/${npc.id}] quest_complete failed:`, (err as Error)?.message ?? err);
+    }
+    return true;
+  }
+
+  // JSON avec un champ type inconnu : controle mal forme, on ne le donne jamais au LLM.
+  console.warn(`[text ${user.username}/${npc.id}] message de controle inconnu ignore: ${ctrl.type}`);
+  return true;
 }
 
 function handleAudioConnection(clientWs: WebSocket, user: AuthenticatedUser, npc: Npc): void {
@@ -305,7 +316,7 @@ function main(): void {
 
     if (path === "/text") {
       wss.handleUpgrade(request, socket, head, (ws) => {
-        void handleTextConnection(ws, user, npc, { questGenerator, questStore });
+        void handleTextConnection(ws, user, npc, { questStore });
       });
     } else if (path === "/audio") {
       wss.handleUpgrade(request, socket, head, (ws) => {
