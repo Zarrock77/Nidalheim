@@ -14,7 +14,7 @@ export async function login(formData: FormData) {
     redirect("/login?error=invalid");
   }
 
-  redirect("/");
+  redirect("/docs");
 }
 
 export async function logout() {
