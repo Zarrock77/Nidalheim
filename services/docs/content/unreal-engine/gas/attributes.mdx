@@ -1,0 +1,341 @@
+---
+title: Attribute Sets
+---
+
+# Attribute Sets
+
+Le projet Nidalheim ne possède **pas un seul** attribute set, mais **trois**, chacun
+isolant un domaine de jeu distinct. Tous héritent de `UAttributeSet` (engine) et vivent
+dans `Source/Nidalheim/AbilitySystem/Attributes/` :
+
+| Set | Domaine | Attribué à |
+|-----|---------|------------|
+| `UNidalheimBasicAttributeSet` | Vitaux & combat reçu (Health, Stamina, Shield, Damage) | `ANidalheimCharacterBase` (base de tous les personnages) |
+| `UNidalheimCombatAttributeSet` | Stats offensives/défensives (Armor, Strength) | `ANidalheimCharacterBase` |
+| `UNidalheimSurvivalAttributeSet` | Jauges de survie (Hunger, Thirst) | `ANidalheimPlayerCharacter` uniquement |
+
+`BasicAttributeSet` et `CombatAttributeSet` sont créés dans le constructeur de
+`ANidalheimCharacterBase` (donc présents sur le joueur **et** les ennemis). Le
+`SurvivalAttributeSet` n'est créé que sur le joueur, où il est piloté par
+`UNidalheimSurvivalComponent`.
+
+```cpp
+// Source/Nidalheim/Character/NidalheimCharacterBase.cpp
+BasicAttributeSet  = CreateDefaultSubobject<UNidalheimBasicAttributeSet>(TEXT("BasicAttributeSet"));
+CombatAttributeSet = CreateDefaultSubobject<UNidalheimCombatAttributeSet>(TEXT("CombatAttributeSet"));
+```
+
+```cpp
+// Source/Nidalheim/Character/NidalheimPlayerCharacter.cpp
+SurvivalAttributeSet = CreateDefaultSubobject<UNidalheimSurvivalAttributeSet>(TEXT("SurvivalAttributeSet"));
+Survival             = CreateDefaultSubobject<UNidalheimSurvivalComponent>(TEXT("Survival"));
+```
+
+> ⚠️ La macro `ATTRIBUTE_ACCESSORS_BASIC(ClassName, PropertyName)` utilisée dans les
+> trois sets vient de l'**engine** (`AttributeSet.h`), **pas** du projet Nidalheim. Elle
+> génère pour chaque attribut les accesseurs `Get<Attr>Attribute()`, `Get<Attr>()`,
+> `Set<Attr>()` et `Init<Attr>()`. Ne pas la chercher dans les sources du projet.
+
+> ⚠️ Tout header qui manipule un `FGameplayAttribute` par référence (signatures de
+> `PreAttributeChange` / `PostGameplayEffectExecute`) doit pouvoir résoudre ce type :
+> les trois sets incluent `AttributeSet.h` et `AbilitySystemComponent.h`. Si vous
+> déclarez une fonction prenant `const FGameplayAttribute&` ailleurs sans inclure
+> `AttributeSet.h`, forward-déclarez le type.
+
+## Tableau récapitulatif des attributs
+
+| Set | Attribut | Max associé | Init constructeur | Répliqué (`OnRep_*`) | Clampé dans |
+|-----|----------|-------------|-------------------|----------------------|-------------|
+| Basic | `Health` | `MaxHealth` | `100.f` | oui | `PreAttributeChange` (0 → `MaxHealth`) |
+| Basic | `MaxHealth` | — | `100.f` | oui | — |
+| Basic | `Stamina` | `MaxStamina` | `100.f` | oui | `PreAttributeChange` (0 → `MaxStamina`) |
+| Basic | `MaxStamina` | — | `100.f` | oui | — |
+| Basic | `Shield` | `MaxShield` | `0.f` | oui | `PreAttributeChange` (0 → `MaxShield`) |
+| Basic | `MaxShield` | — | `100.f` | oui | — |
+| Basic | `Damage` | — | `0.f` | non (meta) | consommé dans `PostGameplayEffectExecute` |
+| Combat | `Armor` | `MaxArmor` | `0.f` | oui | `PreAttributeChange` (0 → `MaxArmor`) |
+| Combat | `MaxArmor` | — | `100.f` | oui | — |
+| Combat | `Strength` | `MaxStrength` | `0.f` | oui | `PreAttributeChange` (0 → `MaxStrength`) |
+| Combat | `MaxStrength` | — | `100.f` | oui | — |
+| Survival | `Hunger` | `MaxHunger` | `100.f` | oui | `PreAttributeChange` (0 → `MaxHunger`) |
+| Survival | `MaxHunger` | — | `100.f` | oui | — |
+| Survival | `Thirst` | `MaxThirst` | `100.f` | oui | `PreAttributeChange` (0 → `MaxThirst`) |
+| Survival | `MaxThirst` | — | `100.f` | oui | — |
+
+> ⚠️ `Damage` est un **meta-attribute** : non répliqué, jamais stocké durablement. Il
+> sert de canal d'entrée pour les `GameplayEffect` de dégâts, est lu puis remis à `0`
+> dans `PostGameplayEffectExecute`. Ne jamais l'afficher en HUD ni le considérer comme
+> persistant.
+
+---
+
+## `UNidalheimBasicAttributeSet`
+
+Le set vital, présent sur tous les personnages. Il porte les six attributs répliqués
+(`Health`/`MaxHealth`, `Stamina`/`MaxStamina`, `Shield`/`MaxShield`) plus le
+meta-attribute `Damage`.
+
+### Déclaration et accesseurs
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Attributes/NidalheimBasicAttributeSet.h
+UPROPERTY(BlueprintReadOnly, Category = "Attributes", ReplicatedUsing=OnRep_Health)
+FGameplayAttributeData Health;
+ATTRIBUTE_ACCESSORS_BASIC(UNidalheimBasicAttributeSet, Health);
+
+UPROPERTY(BlueprintReadOnly, Category = "Attributes", ReplicatedUsing=OnRep_MaxHealth)
+FGameplayAttributeData MaxHealth;
+ATTRIBUTE_ACCESSORS_BASIC(UNidalheimBasicAttributeSet, MaxHealth);
+```
+
+Chaque `OnRep_*` se contente d'appeler la macro engine `GAMEPLAYATTRIBUTE_REPNOTIFY` :
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Attributes/NidalheimBasicAttributeSet.h
+UFUNCTION()
+void OnRep_Health(const FGameplayAttributeData& OldValue) const
+{
+    GAMEPLAYATTRIBUTE_REPNOTIFY(UNidalheimBasicAttributeSet, Health, OldValue);
+}
+```
+
+### Valeurs d'init
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Attributes/NidalheimBasicAttributeSet.cpp
+UNidalheimBasicAttributeSet::UNidalheimBasicAttributeSet()
+{
+    Health = 100.f;
+    MaxHealth = 100.f;
+    Stamina = 100.f;
+    MaxStamina = 100.f;
+    Damage = 0.f;
+    Shield = 0.f;
+    MaxShield = 100.f;
+
+    ShieldBuffTags.AddTag(FGameplayTag::RequestGameplayTag("Status.Buff.Shield"));
+}
+```
+
+### Réplication
+
+Seuls quatre attributs sont déclarés dans `GetLifetimeReplicatedProps` —
+`Health`, `MaxHealth`, `Stamina`, `MaxStamina`. **`Shield`/`MaxShield` et `Damage`
+n'y figurent pas** (alors que `Shield`/`MaxShield` ont bien un `ReplicatedUsing` dans
+le header).
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Attributes/NidalheimBasicAttributeSet.cpp
+void UNidalheimBasicAttributeSet::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+    Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+    DOREPLIFETIME_CONDITION_NOTIFY(UNidalheimBasicAttributeSet, Health, COND_None, REPNOTIFY_Always);
+    DOREPLIFETIME_CONDITION_NOTIFY(UNidalheimBasicAttributeSet, MaxHealth, COND_None, REPNOTIFY_Always);
+    DOREPLIFETIME_CONDITION_NOTIFY(UNidalheimBasicAttributeSet, Stamina, COND_None, REPNOTIFY_Always);
+    DOREPLIFETIME_CONDITION_NOTIFY(UNidalheimBasicAttributeSet, MaxStamina, COND_None, REPNOTIFY_Always);
+}
+```
+
+> ⚠️ `Shield`/`MaxShield` déclarent un `ReplicatedUsing=OnRep_*` mais ne sont **pas**
+> enregistrés dans `GetLifetimeReplicatedProps`. En l'état, ils ne sont donc pas
+> répliqués aux clients — point à corriger si le bouclier doit être visible côté client.
+
+### Clamping (`PreAttributeChange`)
+
+`Health`, `Stamina` et `Shield` sont bornés entre `0` et leur Max respectif :
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Attributes/NidalheimBasicAttributeSet.cpp
+void UNidalheimBasicAttributeSet::PreAttributeChange(const FGameplayAttribute& Attribute, float& NewValue)
+{
+    Super::PreAttributeChange(Attribute, NewValue);
+
+    if (Attribute == GetHealthAttribute())
+    {
+        NewValue = FMath::Clamp(NewValue, 0.f, GetMaxHealth());
+    } else if (Attribute == GetStaminaAttribute())
+    {
+        NewValue = FMath::Clamp(NewValue, 0.f, GetMaxStamina());
+    } else if (Attribute == GetShieldAttribute())
+    {
+        NewValue = FMath::Clamp(NewValue, 0.f, GetMaxShield());
+    }
+}
+```
+
+### Pipeline de dégâts (`PostGameplayEffectExecute`)
+
+Le meta-attribute `Damage` est consommé ici : il est lu, remis à `0`, puis absorbé
+d'abord par le `Shield`, le reliquat retombant sur `Health`. Si l'effet porte le tag
+`Effects.HitReaction` avec une magnitude non nulle, l'ability `GameplayAbility.HitReaction`
+est déclenchée.
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Attributes/NidalheimBasicAttributeSet.cpp
+if (Data.EvaluatedData.Attribute == GetDamageAttribute())
+{
+    float TotalDamage = GetDamage();
+    SetDamage(0.f);
+
+    const float CurrentShield = GetShield();
+    if (CurrentShield > 0.f)
+    {
+        SetShield(CurrentShield - TotalDamage);
+        float RemainingDamage = TotalDamage - CurrentShield;
+
+        if (RemainingDamage > 0.f)
+        {
+            SetHealth(GetHealth() - RemainingDamage);
+        }
+    } else
+    {
+        SetHealth(GetHealth() - TotalDamage);
+    }
+    // ... HitReaction si tag Effects.HitReaction présent
+}
+```
+
+### Mort et cues de bouclier (`PostAttributeChange`)
+
+Seul ce set surcharge aussi `PostAttributeChange` : passage de `Health` à `0` →
+ability `GameplayAbility.Death` ; transitions du `Shield` → gameplay cues
+`GameplayCue.ShieldUp` / `GameplayCue.ShieldDown`.
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Attributes/NidalheimBasicAttributeSet.cpp
+if (Attribute == GetHealthAttribute() && NewValue <= 0.f)
+{
+    FGameplayTagContainer DeathAbilityTagContainer;
+    DeathAbilityTagContainer.AddTag(FGameplayTag::RequestGameplayTag("GameplayAbility.Death"));
+    GetOwningAbilitySystemComponent()->TryActivateAbilitiesByTag(DeathAbilityTagContainer);
+}
+```
+
+---
+
+## `UNidalheimCombatAttributeSet`
+
+Stats de combat : `Armor`/`MaxArmor` et `Strength`/`MaxStrength`. Quatre attributs,
+tous répliqués. Même schéma d'accesseurs et d'`OnRep_*` que le set Basic (les `OnRep_*`
+sont ici `protected`).
+
+### Init
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Attributes/NidalheimCombatAttributeSet.cpp
+UNidalheimCombatAttributeSet::UNidalheimCombatAttributeSet()
+{
+    Armor = 0.f;
+    MaxArmor = 100.0f;
+    Strength = 0.f;
+    MaxStrength = 100.0f;
+}
+```
+
+### Réplication
+
+Les quatre attributs sont enregistrés (cohérent avec leurs `ReplicatedUsing`) :
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Attributes/NidalheimCombatAttributeSet.cpp
+void UNidalheimCombatAttributeSet::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+    Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+    DOREPLIFETIME_CONDITION_NOTIFY(UNidalheimCombatAttributeSet, Armor, COND_None, REPNOTIFY_Always);
+    DOREPLIFETIME_CONDITION_NOTIFY(UNidalheimCombatAttributeSet, MaxArmor, COND_None, REPNOTIFY_Always);
+    DOREPLIFETIME_CONDITION_NOTIFY(UNidalheimCombatAttributeSet, Strength, COND_None, REPNOTIFY_Always);
+    DOREPLIFETIME_CONDITION_NOTIFY(UNidalheimCombatAttributeSet, MaxStrength, COND_None, REPNOTIFY_Always);
+}
+```
+
+### Clamping
+
+`Armor` et `Strength` sont bornés entre `0` et leur Max dans `PreAttributeChange`. Le
+`PostGameplayEffectExecute` ne fait que re-clamper en réécrivant la valeur courante
+(`SetArmor(GetArmor())` / `SetStrength(GetStrength())`), sans logique de dégâts.
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Attributes/NidalheimCombatAttributeSet.cpp
+void UNidalheimCombatAttributeSet::PreAttributeChange(const FGameplayAttribute& Attribute, float& NewValue)
+{
+    Super::PreAttributeChange(Attribute, NewValue);
+
+    if (Attribute == GetArmorAttribute())
+    {
+        NewValue = FMath::Clamp(NewValue, 0.f, GetMaxArmor());
+    } else if (Attribute == GetStrengthAttribute())
+    {
+        NewValue = FMath::Clamp(NewValue, 0.f, GetMaxStrength());
+    }
+}
+```
+
+---
+
+## `UNidalheimSurvivalAttributeSet`
+
+Pilier Survie (F19-F24). Deux jauges seulement : `Hunger`/`MaxHunger` et
+`Thirst`/`MaxThirst`. `Health` et `Stamina` restent dans le set Basic — ce set n'ajoute
+que les jauges propres à la survie. Le drain dans le temps, les debuffs à `0` et la
+consommation sont gérés côté serveur par `UNidalheimSurvivalComponent`, pas par le set
+lui-même (il ne surcharge donc **ni** `PostGameplayEffectExecute` **ni**
+`PostAttributeChange`).
+
+### Init
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Attributes/NidalheimSurvivalAttributeSet.cpp
+UNidalheimSurvivalAttributeSet::UNidalheimSurvivalAttributeSet()
+{
+    Hunger = 100.f;
+    MaxHunger = 100.f;
+    Thirst = 100.f;
+    MaxThirst = 100.f;
+}
+```
+
+### Réplication
+
+Les quatre attributs sont répliqués :
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Attributes/NidalheimSurvivalAttributeSet.cpp
+void UNidalheimSurvivalAttributeSet::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+    Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+    DOREPLIFETIME_CONDITION_NOTIFY(UNidalheimSurvivalAttributeSet, Hunger, COND_None, REPNOTIFY_Always);
+    DOREPLIFETIME_CONDITION_NOTIFY(UNidalheimSurvivalAttributeSet, MaxHunger, COND_None, REPNOTIFY_Always);
+    DOREPLIFETIME_CONDITION_NOTIFY(UNidalheimSurvivalAttributeSet, Thirst, COND_None, REPNOTIFY_Always);
+    DOREPLIFETIME_CONDITION_NOTIFY(UNidalheimSurvivalAttributeSet, MaxThirst, COND_None, REPNOTIFY_Always);
+}
+```
+
+### Clamping
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Attributes/NidalheimSurvivalAttributeSet.cpp
+void UNidalheimSurvivalAttributeSet::PreAttributeChange(const FGameplayAttribute& Attribute, float& NewValue)
+{
+    Super::PreAttributeChange(Attribute, NewValue);
+
+    if (Attribute == GetHungerAttribute())
+    {
+        NewValue = FMath::Clamp(NewValue, 0.f, GetMaxHunger());
+    }
+    else if (Attribute == GetThirstAttribute())
+    {
+        NewValue = FMath::Clamp(NewValue, 0.f, GetMaxThirst());
+    }
+}
+```
+
+Le `UNidalheimSurvivalComponent` lit/écrit ces attributs via les accesseurs statiques
+(`GetHungerAttribute()`, `GetThirstAttribute()`, etc.), applique le drain par tick côté
+serveur et déclenche les debuffs lorsque la jauge atteint `0`. Voir la page Survie pour
+le détail du drain et de `Consume()`/`Rest()`.
+
+## Voir aussi
+
+- [GAS — vue d'ensemble](/docs/unreal-engine/gas)
+- [Survie](/docs/unreal-engine/survival)
+- [Personnage joueur](/docs/unreal-engine/characters/player)

@@ -1,0 +1,335 @@
+---
+title: Inventaire & hotbar
+---
+
+# Inventaire & hotbar
+
+Le système d'inventaire de Nidalheim regroupe quatre composants C++ runtime
+(`Source/Nidalheim/Inventory/`) et quatre widgets Slate
+(`Source/Nidalheim/UI/Inventory/`). Toute la logique vit en C++ ; l'UI lit les
+données via getters et se rafraîchit sur des delegates `OnInventoryChanged` /
+`OnHotbarChanged`.
+
+Acteurs en présence :
+
+- `FNidalheimInventoryItem` / `ENidalheimItemType` — le modèle de donnée d'un item.
+- `UNidalheimInventoryComponent` — le sac (slots de taille fixe, stacking).
+- `UNidalheimHotbarComponent` — la barre d'accès rapide (équipe l'arme du slot).
+- `ANidalheimItemPickup` — l'item posé au sol, ramassé par overlap.
+- Les 4 widgets : `UNidalheimInventoryWidget`, `UNidalheimInventorySlotWidget`,
+  `UNidalheimHotbarWidget`, `UNidalheimHotbarSlotWidget`.
+
+## Modèle de donnée — `FNidalheimInventoryItem` & `ENidalheimItemType`
+
+```cpp
+// Source/Nidalheim/Inventory/NidalheimItemTypes.h
+UENUM(BlueprintType)
+enum class ENidalheimItemType : uint8
+{
+    None        UMETA(DisplayName = "None"),
+    Weapon      UMETA(DisplayName = "Weapon"),
+    Consumable  UMETA(DisplayName = "Consumable"),
+    Resource    UMETA(DisplayName = "Resource"),
+    Misc        UMETA(DisplayName = "Misc")
+};
+```
+
+Un item est un `USTRUCT` plat — pas d'objet ni de DataTable à l'exécution (le
+pickup porte directement sa donnée, voir plus bas).
+
+```cpp
+// Source/Nidalheim/Inventory/NidalheimItemTypes.h
+USTRUCT(BlueprintType)
+struct FNidalheimInventoryItem
+{
+    GENERATED_BODY()
+
+    UPROPERTY(...) FName ItemId = NAME_None;
+    UPROPERTY(...) FText DisplayName;
+    UPROPERTY(...) ENidalheimItemType Type = ENidalheimItemType::None;
+    UPROPERTY(...) int32 Quantity = 0;
+    UPROPERTY(...) int32 MaxStack = 1;
+    UPROPERTY(...) TObjectPtr<UTexture2D> Icon = nullptr;
+    /** Pour un item de type Weapon : la classe d'arme à équiper. */
+    UPROPERTY(...) TSubclassOf<ANidalheimWeaponBase> WeaponClass;
+
+    bool IsEmpty() const { return Quantity <= 0 || Type == ENidalheimItemType::None; }
+
+    bool CanStackWith(const FNidalheimInventoryItem& Other) const
+    {
+        return !IsEmpty() && Type == Other.Type && ItemId == Other.ItemId && MaxStack > 1;
+    }
+};
+```
+
+Deux helpers portent toute la sémantique : un slot est vide si sa quantité est
+`<= 0` ou son type `None` ; deux items se stackent seulement s'ils ont même
+`Type`, même `ItemId` et `MaxStack > 1`.
+
+### Types d'items
+
+| `ENidalheimItemType` | Valeur | Rôle | Câblé dans `ActivateSlot` ? |
+|---|---|---|---|
+| `None` | 0 | Slot vide (sentinelle de `IsEmpty`) | n/a |
+| `Weapon` | 1 | Arme équipable — `WeaponClass` renseigné | Oui — équipe via le WeaponsManager |
+| `Consumable` | 2 | Consommable de survie (faim/soif/santé) | **Non — `case` vide / TODO** |
+| `Resource` | 3 | Ressource (stackable) | Non (tombe dans `default:`) |
+| `Misc` | 4 | Divers | Non (tombe dans `default:`) |
+
+## `UNidalheimInventoryComponent`
+
+Tableau de slots de taille fixe (`Capacity = 25` par défaut). À `BeginPlay`, il
+dimensionne `Items` puis injecte les `StartingItems` (ex. épée/arc) via `AddItem`.
+
+```cpp
+// Source/Nidalheim/Inventory/NidalheimInventoryComponent.cpp
+bool UNidalheimInventoryComponent::AddItem(const FNidalheimInventoryItem& Item)
+{
+    if (Item.IsEmpty()) { return false; }
+
+    // 1) Tenter de stacker sur un slot compatible.
+    for (FNidalheimInventoryItem& Slot : Items)
+    {
+        if (Slot.CanStackWith(Item) && Slot.Quantity < Slot.MaxStack)
+        {
+            Slot.Quantity = FMath::Min(Slot.Quantity + Item.Quantity, Slot.MaxStack);
+            OnInventoryChanged.Broadcast();
+            return true;
+        }
+    }
+    // 2) Sinon, premier slot vide.
+    for (FNidalheimInventoryItem& Slot : Items)
+    {
+        if (Slot.IsEmpty()) { Slot = Item; OnInventoryChanged.Broadcast(); return true; }
+    }
+    return false; // plein
+}
+```
+
+Comportement à noter :
+
+- **Stacking d'abord, slot vide ensuite.** `AddItem` cherche un stack compatible
+  non plein avant d'occuper le premier slot vide.
+- **Clamp au `MaxStack`.** L'excédent qui dépasse `MaxStack` lors d'un stack est
+  silencieusement perdu (pas de débordement vers un second slot).
+- **Plein → `false`.** Si aucun stack ni slot vide, l'item n'est pas placé.
+- `RemoveItemAt(Index)` réinitialise le slot avec un `FNidalheimInventoryItem()`
+  par défaut (donc `IsEmpty()`), puis broadcast.
+- Chaque mutation diffuse `OnInventoryChanged` — c'est le signal que l'UI écoute.
+
+> ⚠️ **Pas de réplication réseau.** Malgré la mention « réplication » du contrat,
+> le tableau `Items` est `UPROPERTY(Transient)` (non `Replicated`) et le composant
+> ne déclare pas `GetLifetimeReplicatedProps`. L'inventaire est donc local au
+> propriétaire ; il n'est pas synchronisé serveur → client tel qu'écrit.
+
+## `UNidalheimHotbarComponent`
+
+Barre de `SlotCount = 10` emplacements. À `BeginPlay`, elle copie les
+`StartingSlots` (ex. épée en slot 0, arc en slot 1) dans `Slots`. Le slot
+`SelectedSlot` (0 par défaut) représente « ce qu'on a en main ».
+
+### `ActivateSlot` — le switch par type
+
+C'est le cœur de l'utilisation d'un item. Le `FIX` documenté dans le header :
+contrairement à l'ancien Blueprint qui ne faisait qu'un `PrintText`, ce code
+**équipe réellement** l'arme.
+
+```cpp
+// Source/Nidalheim/Inventory/NidalheimHotbarComponent.cpp
+void UNidalheimHotbarComponent::ActivateSlot(int32 Index)
+{
+    if (!Slots.IsValidIndex(Index)) { return; }
+    const FNidalheimInventoryItem& Item = Slots[Index];
+    if (Item.IsEmpty()) { return; }
+
+    switch (Item.Type)
+    {
+    case ENidalheimItemType::Weapon:
+    {
+        // FIX : on ÉQUIPE réellement l'arme (l'ancien BP ne faisait qu'un PrintText).
+        if (AActor* Owner = GetOwner())
+        {
+            if (UNidalheimWeaponsManagerComponent* WMC = Owner->FindComponentByClass<UNidalheimWeaponsManagerComponent>())
+            {
+                if (*Item.WeaponClass) { WMC->EquipWeaponByClass(Item.WeaponClass); }
+            }
+        }
+        break;
+    }
+    case ENidalheimItemType::Consumable:
+        // TODO (migration consommables) : appliquer l'effet associé.
+        break;
+    default:
+        break;
+    }
+}
+```
+
+> ⚠️ **`case Consumable:` est vide (TODO non câblé).** Le branchement existe mais
+> son corps se résume au commentaire `// TODO (migration consommables) : appliquer
+> l'effet associé.`. Activer un consommable depuis la hotbar **ne déclenche aucun
+> effet de survie** : la jonction vers `UNidalheimSurvivalComponent`
+> (`Consume()` / `Rest()`) n'est pas faite. Les features survie **F22 (faim),
+> F23 (soif), F24 (santé/consommables)** ne sont donc **pas encore reliées** aux
+> items consommables. Les types `Resource` et `Misc` tombent en `default:` et ne
+> font rien non plus — c'est attendu.
+
+### Sélection (clavier / molette)
+
+```cpp
+// Source/Nidalheim/Inventory/NidalheimHotbarComponent.cpp
+void UNidalheimHotbarComponent::SelectSlot(int32 Index)
+{
+    if (Index < 0 || Index >= SlotCount) { return; }
+    SelectedSlot = Index;
+
+    if (Slots.IsValidIndex(Index) && !Slots[Index].IsEmpty())
+    {
+        ActivateSlot(Index); // item présent -> on l'équipe
+    }
+    else if (AActor* Owner = GetOwner())
+    {
+        // Case VIDE : rien dans les mains -> on déséquipe l'arme courante.
+        if (UNidalheimWeaponsManagerComponent* WMC = Owner->FindComponentByClass<UNidalheimWeaponsManagerComponent>())
+        {
+            WMC->UnequipCurrentWeapon();
+        }
+    }
+    OnHotbarChanged.Broadcast(); // met à jour le cadre de sélection côté UI
+}
+```
+
+- `SelectSlot(i)` sélectionne **et applique** : item présent → `ActivateSlot` ;
+  slot vide → `UnequipCurrentWeapon` (mains vides). Le slot 0 est volontairement
+  laissé vide = « rien en main ».
+- `SelectNext` / `SelectPrev` bouclent modulo `SlotCount` (molette).
+- `SetSlotItem(Index, Item)` écrit un slot et broadcast — utilisé par le pickup.
+- `OnHotbarChanged` rafraîchit le cadre de sélection dans l'UI.
+
+> ⚠️ Même remarque de réplication que l'inventaire : `Slots` et `SelectedSlot`
+> sont `Transient`, non répliqués. La hotbar est locale.
+
+## `ANidalheimItemPickup` — ramassage au sol
+
+`AActor` posé en niveau : un `Model` (StaticMesh) qui tourne via un
+`URotatingMovementComponent`, un VFX Niagara optionnel, et une
+`USphereComponent` d'overlap (rayon 96 cm). Le port C++ porte directement la
+donnée d'item plutôt que de relire l'ancienne DataTable `DT_PickupItems`.
+
+```cpp
+// Source/Nidalheim/Inventory/NidalheimItemPickup.cpp
+void ANidalheimItemPickup::OnSphereOverlap(/* ... */ AActor* OtherActor /* ... */)
+{
+    if (!IsValid(OtherActor) || OtherActor == this) { return; }
+
+    // Seul un acteur portant un inventaire (le joueur) peut ramasser.
+    UNidalheimInventoryComponent* Inventory = OtherActor->FindComponentByClass<UNidalheimInventoryComponent>();
+    if (!Inventory) { return; }
+
+    FNidalheimInventoryItem Given = Item;
+    Given.Quantity = FMath::Max(1, Quantity);
+
+    // Inventaire plein -> le pickup reste au sol (pas détruit, pas perdu).
+    if (!Inventory->AddItem(Given)) { return; }
+
+    if (bAddToHotbar)
+    {
+        if (UNidalheimHotbarComponent* HotbarComp = OtherActor->FindComponentByClass<UNidalheimHotbarComponent>())
+        {
+            const TArray<FNidalheimInventoryItem>& Slots = HotbarComp->GetSlots();
+            for (int32 SlotIndex = 0; SlotIndex < Slots.Num(); ++SlotIndex)
+            {
+                if (Slots[SlotIndex].IsEmpty()) { HotbarComp->SetSlotItem(SlotIndex, Given); break; }
+            }
+        }
+    }
+    Destroy();
+}
+```
+
+Points clés :
+
+- Le ramassage est déclenché par **simple overlap** ; pas de touche d'interaction.
+- Le porteur doit avoir un `UNidalheimInventoryComponent` (équivalent du check
+  d'interface de l'original) — sinon l'overlap est ignoré.
+- **Sécurité « plein »** : si `AddItem` échoue, le pickup n'est pas détruit (l'item
+  resterait sinon perdu, et la hotbar aurait une entrée sans contrepartie sac).
+- Si `bAddToHotbar` (vrai par défaut), l'item est aussi placé dans le **premier
+  slot libre** de la hotbar.
+
+## Les 4 widgets UI (Slate, construits en C++)
+
+Tous les widgets sont des `UUserWidget` dont l'arbre est bâti **entièrement en
+C++** dans `RebuildWidget` (pas d'asset UMG), avec une garde `bBuilt` pour ne
+construire qu'une fois. Ils sont issus de la décompilation des `WBP_*` d'origine.
+
+| Widget | Rôle | Lien data | Action au clic |
+|---|---|---|---|
+| `UNidalheimInventoryWidget` | Panneau d'inventaire (grille 5 colonnes, slide à l'ouverture) | écoute `OnInventoryChanged` | bouton « x » = ferme |
+| `UNidalheimInventorySlotWidget` | Un slot d'inventaire (icône + badge quantité si `> 1`) | reçoit un `FNidalheimInventoryItem` via `SetItem` | clic = équipe l'arme (`WeaponsManager`) |
+| `UNidalheimHotbarWidget` | La barre (1 ligne de slots, `770x70`) | écoute `OnHotbarChanged` | n/a |
+| `UNidalheimHotbarSlotWidget` | Un slot de hotbar (icône + n° de touche + cadre de sélection) | reçoit `(Hotbar, Index)` via `SetSlot` | clic = `ActivateSlot(Index)` |
+
+Détails fidèles au code :
+
+- **Rebranchement au respawn.** `InventoryWidget` et `HotbarWidget` vivent sur le
+  PlayerController (survivent au respawn) ; ils écoutent `OnPossessedPawnChanged`
+  et se re-binde au composant du pawn courant via `BindToCurrentInventory` /
+  `BindToCurrentHotbar` (sinon ils pointeraient sur l'ancien pawn détruit).
+- **Panneau inventaire** : grille `UUniformGridPanel` à 5 colonnes ; placement
+  `Index / 5` (ligne), `Index % 5` (colonne). `ToggleVisibility()` anime un slide
+  horizontal via un timer (~60 Hz).
+- **Slot d'inventaire** : clic n'agit que pour un `Weapon` avec `WeaponClass` non
+  nul → `EquipWeaponByClass`. Le badge de quantité n'apparaît que si `Quantity > 1`.
+- **Slot de hotbar** : affiche le numéro de touche `(Index + 1) % 10` (donc `1..9`
+  puis `0` pour le 10ᵉ). Le cadre de sélection (`SelectionFrame`, contour doré)
+  n'est visible que si `Hotbar->GetSelectedSlot() == Index`. Clic →
+  `Hotbar->ActivateSlot(Index)`.
+
+## Flux complet — ramassage → inventaire → hotbar → activation
+
+```
+1. Le joueur entre dans la sphère d'un ANidalheimItemPickup (overlap, rayon 96cm)
+        |
+        v
+2. OnSphereOverlap : le pawn a-t-il un UNidalheimInventoryComponent ?
+        | non -> ignoré
+        | oui
+        v
+3. Inventory->AddItem(Given)
+        |  stack compatible (CanStackWith + Quantity < MaxStack) -> +Quantity
+        |  sinon premier slot vide -> occupé
+        |  plein -> false -> pickup PAS détruit, reste au sol  (STOP)
+        v
+4. OnInventoryChanged.Broadcast()  ->  UNidalheimInventoryWidget::Rebuild() (grille redessinée)
+        |
+        v
+5. Si bAddToHotbar : 1er slot hotbar libre -> HotbarComp->SetSlotItem(i, Given)
+        -> OnHotbarChanged.Broadcast() -> UNidalheimHotbarWidget::Rebuild()
+        v
+6. Destroy() du pickup
+        |
+        v
+7. Le joueur sélectionne le slot (touche 1..0 / molette -> SelectSlot)
+   ou clique le slot dans l'UI (-> ActivateSlot)
+        |
+        v
+8. ActivateSlot(Index) switch (Item.Type) :
+        - Weapon     -> WeaponsManager->EquipWeaponByClass(WeaponClass)  [OK]
+        - Consumable -> TODO vide : AUCUN effet (survie F22-F24 non câblée)
+        - default    -> rien (Resource, Misc)
+```
+
+> ⚠️ **Jonction survie manquante.** L'étape 8 pour un `Consumable` est un cul-de-sac :
+> le `case` est vide. Pour livrer F22–F24, il faudra y appeler
+> `UNidalheimSurvivalComponent::Consume()` (et décrémenter la quantité de l'item /
+> retirer le slot). Voir la page survie.
+
+## Voir aussi
+
+- [Survie](/docs/unreal-engine/survival) — `UNidalheimSurvivalComponent`, jauges
+  faim/soif/santé, `Consume()` / `Rest()` (la cible du `case Consumable` à câbler).
+- [Armes](/docs/unreal-engine/weapons) — `UNidalheimWeaponsManagerComponent`,
+  `EquipWeaponByClass`, déséquipement.
+- [HUD](/docs/unreal-engine/hud) — intégration des widgets inventaire/hotbar dans
+  le HUD joueur.

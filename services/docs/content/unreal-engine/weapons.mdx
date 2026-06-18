@@ -1,0 +1,296 @@
+---
+title: Armes & projectiles
+---
+
+# Armes & projectiles
+
+Le système d'armes vit dans `Source/Nidalheim/Weapons/`. Une arme est un `AActor` répliqué (`ANidalheimWeaponBase`) porté par un personnage, géré par un composant (`UNidalheimWeaponsManagerComponent`) qui spawn, attache et bascule les armes. Les capacités de combat (mêlée, tir) sont des abilities GAS qui se *gate* sur l'arme équipée via un `FGameplayTag` d'identité.
+
+> ⚠️ **Divergence avec la doc EIP** : le document `Nidalheim_Context_Cowork.docx` décrit un schéma `AC_AIBrain` / REST. Ce qui suit décrit l'implémentation réelle (armes + GAS), indépendante de la chaîne IA des PNJ.
+
+## Vue d'ensemble
+
+| Arme | Classe | Tag d'identité | Ability associée | Projectile |
+|---|---|---|---|---|
+| Épée | `ANidalheimWeaponSword` | `Weapon.Melee.Sword` | abilities de mêlée (`UNidalheimMeleeAttackAbility` & co., gated `Weapon.Melee.Sword`) | aucun |
+| Arc | `ANidalheimWeaponBow` | `Weapon.Ranged.Bow` | `UNidalheimShootProjectileAbility` | `ANidalheimProjectileArrow` (configurable) |
+| Bâton | `ANidalheimWeaponStaff` | `Weapon.Magic.Staff` | — (aucune ability de tir dédiée en C++) | — |
+
+> ⚠️ **Le bâton ne tire rien aujourd'hui.** Seul l'arc instancie un projectile. `ANidalheimWeaponStaff` est une sous-classe data (mesh + sockets + tag `Weapon.Magic.Staff` + réglages caméra identiques à l'arc) ; aucune `UNidalheimShootProjectileAbility` (ni autre classe de projectile) ne référence le staff dans le code. La projectile/ability « magie » reste à câbler.
+
+## Hiérarchie des armes
+
+```
+AActor (Unreal)
+└── ANidalheimWeaponBase            (Abstract — mesh, SpawnPoint, Config, WeaponIdentityTag)
+    ├── ANidalheimWeaponSword       (Weapon.Melee.Sword)
+    ├── ANidalheimWeaponBow         (Weapon.Ranged.Bow — PoseableMesh corde + flèche encochée)
+    └── ANidalheimWeaponStaff       (Weapon.Magic.Staff)
+```
+
+`ANidalheimWeaponBase` est `UCLASS(Abstract)` : on n'instancie jamais la base, seulement les trois sous-classes concrètes. Chaque sous-classe règle nativement (dans son constructeur) son mesh, ses sockets, son `WeaponIdentityTag` et sa `Config` via `ConstructorHelpers::FObjectFinder` / `FClassFinder`.
+
+```cpp
+// Source/Nidalheim/Weapons/NidalheimWeaponSword.cpp
+ANidalheimWeaponSword::ANidalheimWeaponSword()
+{
+    WeaponIdentityTag = NidalheimGameplayTags::Weapon_Melee_Sword;
+
+    Config.EquippedSocketName = TEXT("sword_equipped_socket");
+    Config.StowedSocketName = TEXT("sword_stowed_socket");
+    Config.bUseControllerDesiredRotation = true; // strafe arme en main
+    // ... mesh / AnimClass / Equip / Unequip montages chargés par ConstructorHelpers
+}
+```
+
+## Types — `NidalheimWeaponTypes.h`
+
+`FNidalheimWeaponConfig` est le bloc de config par arme (remplace l'ancien struct Blueprint `S_WeaponConfig`). Tous ses champs sont `EditDefaultsOnly` : réglés par classe d'arme, pas par instance.
+
+```cpp
+// Source/Nidalheim/Weapons/NidalheimWeaponTypes.h
+USTRUCT(BlueprintType)
+struct FNidalheimWeaponConfig
+{
+    GENERATED_BODY()
+
+    FName EquippedSocketName = NAME_None;   // socket "en main"
+    FName StowedSocketName   = NAME_None;   // socket "rangé" (dos/hanche)
+
+    TSubclassOf<UAnimInstance> AnimClass;   // AnimBP du mesh quand l'arme est en main
+    TObjectPtr<UAnimMontage> EquipMontage   = nullptr;
+    TObjectPtr<UAnimMontage> UnequipMontage = nullptr;
+
+    float MaxWalkSpeed = 0.f;               // 0 = vitesse inchangée
+    bool  bUseControllerDesiredRotation = false; // strafe vs orientation au mouvement
+
+    bool  bShouldOverrideCameraSettings = false;
+    float FieldOfView = 90.f;
+    FVector CameraOffset = FVector::ZeroVector;  // SocketOffset du CameraBoom
+    bool  bShouldShowCrosshair = false;
+};
+```
+
+Le seul « enum/struct » du module est ce struct ; il n'y a pas d'enum de type d'arme — l'identité passe par le `FGameplayTag` (`Weapon.Melee.Sword`, `Weapon.Ranged.Bow`, `Weapon.Magic.Staff`, définis dans `Core/NidalheimGameplayTags`).
+
+### Composants de `ANidalheimWeaponBase`
+
+- `WeaponMesh` (`UStaticMeshComponent`) — racine de l'acteur, sans collision (`NoCollision` / `ECR_Ignore`).
+- `SpawnPoint` (`USceneComponent`) — origine des tirs, position relative réglée par la sous-classe (pour l'arc, `FVector::ZeroVector` car le pivot de `SM_Bow` est au centre). Exposé via `GetSpawnPointLocation()`.
+
+L'arc ajoute deux composants supplémentaires : un `NockedArrow` (`UStaticMeshComponent`, `SM_Arrow` masqué hors visée) et un `PoseableBow` (`UPoseableMeshComponent`, le `SK_Bow` riggé dont l'os `string_nock` est posé sur la main chaque frame pour plier la corde). L'arc tick (suivi de corde géométrique) ; épée et bâton non.
+
+## Réplication des armes
+
+```cpp
+// Source/Nidalheim/Weapons/NidalheimWeaponBase.cpp
+ANidalheimWeaponBase::ANidalheimWeaponBase()
+{
+    bReplicates = true;
+    SetReplicateMovement(false); // l'attache suit le mesh, pas besoin de répliquer la transform
+    // ...
+}
+```
+
+> ⚠️ **Autorité & réplication.** Les armes sont des acteurs répliqués (`bReplicates = true`) mais `SetReplicateMovement(false)` : leur position n'est pas répliquée, c'est l'attache au socket du mesh (lui-même répliqué via le pawn) qui les positionne sur les clients. Le spawn d'armes est **autoritaire** (serveur / standalone), et l'arme équipée est répliquée séparément par le manager (voir `EquippedWeapon` / `OnRep` ci-dessous).
+
+### Attache aux sockets
+
+`AttachToOwnerStowed` / `AttachToOwnerEquipped` attachent l'arme au socket `Stowed`/`Equipped` du `GetMesh()` du personnage. Si le socket est absent du squelette, l'arme est attachée à la racine du mesh (avec un warning) plutôt que de flotter au point de spawn :
+
+```cpp
+// Source/Nidalheim/Weapons/NidalheimWeaponBase.cpp
+void ANidalheimWeaponBase::AttachToOwnerSocket(ACharacter* OwnerCharacter, FName SocketName)
+{
+    // ... garde-fous IsValid(OwnerCharacter) / IsValid(OwnerMesh)
+    const FAttachmentTransformRules Rules(EAttachmentRule::SnapToTarget, /*...*/, true);
+    if (SocketName.IsNone() || !OwnerMesh->DoesSocketExist(SocketName))
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[%s] Socket '%s' introuvable sur %s — attache à la racine."), /*...*/);
+        AttachToComponent(OwnerMesh, Rules);
+        return;
+    }
+    AttachToComponent(OwnerMesh, Rules, SocketName);
+}
+```
+
+## Le gestionnaire d'armes — `UNidalheimWeaponsManagerComponent`
+
+Composant d'acteur (`UActorComponent`, `SetIsReplicatedByDefault(true)`) attaché au personnage. Il gère le loadout : spawn des armes de départ (rangées), équipement/déséquipement, et la notification `OnWeaponChanged` (barre GAS, caméra, anims).
+
+### API publique
+
+| Membre | Rôle |
+|---|---|
+| `DefaultWeapons` (`TArray<TSubclassOf<...>>`) | loadout de départ ; l'index = le slot (touche 1, 2, …) |
+| `EquipWeaponBySlot(int32)` | équipe l'arme du slot ; toggle si déjà équipée |
+| `EquipWeaponByClass(TSubclassOf<...>)` | équipe par classe ; toggle si déjà équipée |
+| `UnequipCurrentWeapon()` | range l'arme courante |
+| `GetEquippedWeapon()` | arme en main (ou `nullptr`) |
+| `OnWeaponChanged` (delegate) | diffusé à chaque changement (`nullptr` = désarmé) |
+| `bSwitchAnimClassOnEquip` | bascule l'AnimBP du mesh sur celui de l'arme (faux pour les ennemis) |
+| `UnarmedWeaponConfig` | état « désarmé » restauré au déséquipement |
+
+### Spawn des armes de départ (autorité)
+
+Au `BeginPlay`, le composant capture l'AnimBP idle et la `MaxWalkSpeed` initiale du mesh (pour le retour désarmé), puis — **uniquement si `HasAuthority()`** — spawn chaque arme de `DefaultWeapons` rangée :
+
+```cpp
+// Source/Nidalheim/Weapons/NidalheimWeaponsManagerComponent.cpp
+ANidalheimWeaponBase* UNidalheimWeaponsManagerComponent::GiveWeapon(TSubclassOf<ANidalheimWeaponBase> WeaponClass)
+{
+    // ... garde-fous
+
+    // FIX : spawn à la position de l'owner (et non à l'origine du monde) + AlwaysSpawn,
+    // pour que FinishSpawningActor ne renvoie jamais nullptr à cause d'une collision à (0,0,0).
+    FActorSpawnParameters SpawnParams;
+    SpawnParams.Owner      = OwningCharacter;
+    SpawnParams.Instigator = OwningCharacter;
+    SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+    ANidalheimWeaponBase* NewWeapon = World->SpawnActor<ANidalheimWeaponBase>(
+        WeaponClass, OwningCharacter->GetActorTransform(), SpawnParams);
+    // ...
+    StowedWeapons.AddUnique(NewWeapon);
+    NewWeapon->AttachToOwnerStowed(OwningCharacter);
+    return NewWeapon;
+}
+```
+
+### Réplication de l'arme équipée
+
+L'arme en main est exposée via une propriété répliquée `EquippedWeapon` avec `OnRep` :
+
+```cpp
+// Source/Nidalheim/Weapons/NidalheimWeaponsManagerComponent.h
+UPROPERTY(ReplicatedUsing = OnRep_EquippedWeapon, Transient)
+TObjectPtr<ANidalheimWeaponBase> EquippedWeapon;
+```
+
+Un client qui appelle `EquipWeaponByClass` sans autorité **délègue au serveur** via un RPC `Server, Reliable` :
+
+```cpp
+// Source/Nidalheim/Weapons/NidalheimWeaponsManagerComponent.cpp
+void UNidalheimWeaponsManagerComponent::EquipWeaponByClass(TSubclassOf<ANidalheimWeaponBase> WeaponClass)
+{
+    if (!GetOwner()->HasAuthority())
+    {
+        ServerEquipWeaponByClass(WeaponClass); // délégation serveur
+        return;
+    }
+    // toggle si déjà équipée, sinon SetEquippedWeapon(...)
+}
+```
+
+Le serveur appelle `SetEquippedWeapon` → modifie `EquippedWeapon` → `ApplyEquippedWeaponState` localement, tandis que les clients reçoivent la même méthode via `OnRep_EquippedWeapon`. L'état visuel est donc cohérent serveur + clients.
+
+## Flux d'équipement
+
+```
+EquipWeaponBySlot(i) / EquipWeaponByClass(C)
+  │  (client sans autorité)  ──► ServerEquipWeaponByClass(C)  [RPC]
+  ▼
+SetEquippedWeapon(NewWeapon)            (autorité)
+  ├─ EquippedWeapon = NewWeapon         → réplication
+  └─ ApplyEquippedWeaponState(Old)      (serveur) ─┐
+                                                   │  côté client :
+  OnRep_EquippedWeapon(Old) ───► ApplyEquippedWeaponState(Old)
+       │
+       ├─ range l'ancienne arme (AttachToOwnerStowed)
+       ├─ bascule AnimBP (Config.AnimClass) + MaxWalkSpeed + rotation controller
+       ├─ joue Config.EquipMontage via UPlayMontageCallbackProxy
+       │     └─ notify "Equip"   ─► EquippedWeapon->AttachToOwnerEquipped()  (arme en main)
+       │     └─ notify "Unequip" ─► PreviouslyEquipped->AttachToOwnerStowed() (rangée au dos)
+       │     └─ (interrompu)      ─► OnEquipMontageAborted → force les deux attaches
+       └─ OnWeaponChanged.Broadcast(EquippedWeapon)   (UI / caméra)
+```
+
+Point clé : **l'arme ne passe pas en main instantanément**. `ApplyEquippedWeaponState` joue le montage de dégainage, et c'est le *notify* `"Equip"` du montage qui déclenche `AttachToOwnerEquipped` au bon frame de l'animation (idem `"Unequip"` pour le rangement). S'il n'y a pas de montage, l'attache est directe.
+
+```cpp
+// Source/Nidalheim/Weapons/NidalheimWeaponsManagerComponent.cpp
+void UNidalheimWeaponsManagerComponent::OnEquipMontageNotify(FName NotifyName)
+{
+    if (NotifyName == TEXT("Equip"))
+    {
+        if (IsValid(EquippedWeapon))
+            EquippedWeapon->AttachToOwnerEquipped(OwningCharacter);
+    }
+    else if (NotifyName == TEXT("Unequip"))
+    {
+        if (IsValid(PreviouslyEquippedWeapon))
+            PreviouslyEquippedWeapon->AttachToOwnerStowed(OwningCharacter);
+    }
+}
+```
+
+> ⚠️ Un montage du même slot group jouant juste après (ex. bandage de l'arc) peut **interrompre** le montage d'équipement avant son notify, laissant une arme fantôme dans le dos. `OnEquipMontageAborted` est le filet de sécurité : il rejoue idempotemment les deux notifies pour forcer l'attache finale.
+
+## Projectiles
+
+```
+AActor (Unreal)
+└── ANidalheimProjectileBase       (sphère overlap, ProjectileMovement, EffectSpecHandle)
+    └── ANidalheimProjectileArrow  (+ ArrowMesh SM_Arrow visible)
+```
+
+`ANidalheimProjectileBase` est un port fidèle de `BP_Projectile_Base` : sphère d'overlap (rayon 32, **Block** sur le monde, **Overlap** sur les pawns), vol rectiligne sans gravité vers `TargetLocation` à `Speed` cm/s. Pas de lifespan, pas de rebond, pas de homing, pas de filtrage allié. À l'overlap d'un acteur autre que l'`Instigator`, il applique son `EffectSpecHandle` (pré-construit par le tireur) sur l'ASC de la cible, puis se détruit ; un impact bloquant le détruit aussi.
+
+```cpp
+// Source/Nidalheim/Weapons/NidalheimProjectileBase.cpp
+void ANidalheimProjectileBase::OnSphereBeginOverlap(/* ... */ AActor* OtherActor, /* ... */)
+{
+    if (OtherActor == GetInstigator()) return; // le tireur est traversé
+
+    if (UAbilitySystemComponent* TargetASC =
+            UAbilitySystemBlueprintLibrary::GetAbilitySystemComponent(OtherActor))
+    {
+        if (EffectSpecHandle.IsValid())
+            TargetASC->ApplyGameplayEffectSpecToSelf(*EffectSpecHandle.Data.Get());
+    }
+    Destroy(); // premier overlap non-instigateur = destruction
+}
+```
+
+`Speed` et `TargetLocation` sont `ExposeOnSpawn` (à poser avant `FinishSpawning`) ; la vélocité est calculée au `BeginPlay` (`(TargetLocation - GetActorLocation()).GetSafeNormal() * Speed`) puis le `ProjectileMovement` est activé manuellement.
+
+`ANidalheimProjectileArrow` ajoute simplement un `ArrowMesh` (`SM_Arrow`) sans collision, retourné de 180° en yaw pour que la pointe mène le vol (le `bRotationFollowsVelocity` oriente le +X de l'acteur, mais la pointe du mesh est côté -X).
+
+## Lien arme ↔ abilities GAS
+
+Les abilities d'arme dérivent de `UNidalheimWeaponGameplayAbility` (elle-même `UNidalheimGameplayAbility`). Cette base :
+
+- s'affiche dans la barre GAS (`ShouldShowInAbilitiesBar = true`),
+- expose un `RequiredWeaponTag` (`FGameplayTag`, `EditDefaultsOnly`),
+- surcharge `CanActivateAbility` pour n'autoriser l'activation que si l'arme équipée porte ce tag.
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Abilities/NidalheimWeaponGameplayAbility.cpp
+bool UNidalheimWeaponGameplayAbility::CanActivateAbility(/* ... */) const
+{
+    if (!Super::CanActivateAbility(/* ... */)) return false;
+    if (!RequiredWeaponTag.IsValid()) return true; // pas de contrainte d'arme
+
+    const UNidalheimWeaponsManagerComponent* WMC = GetWeaponsManager(ActorInfo);
+    const ANidalheimWeaponBase* Equipped = WMC ? WMC->GetEquippedWeapon() : nullptr;
+    return Equipped && Equipped->GetWeaponIdentityTag().MatchesTag(RequiredWeaponTag);
+}
+```
+
+`GetWeaponsManager` retrouve le `UNidalheimWeaponsManagerComponent` sur l'avatar via `FindComponentByClass`, et `GetEquippedWeapon` en lit l'arme courante. C'est donc le **tag d'identité de l'arme** (`GetWeaponIdentityTag()`, réglé dans le constructeur de chaque sous-classe) qui « accorde » l'ability : une ability avec `RequiredWeaponTag = Weapon.Ranged.Bow` ne s'active que l'arc en main.
+
+### Cas de l'arc — `UNidalheimShootProjectileAbility`
+
+`UNidalheimShootProjectileAbility` (sous-classe de `UNidalheimWeaponGameplayAbility`) est l'ability de tir à l'arc, sur clic droit maintenu : bandage → boucle de maintien → relâcher = spawn du projectile depuis le `SpawnPoint` de l'arc vers le point visé. Elle :
+
+- manipule directement `ANidalheimWeaponBow` (mémorisé dans `ActiveBow`) pour piloter la corde et la flèche encochée ;
+- spawn une classe `ProjectileClass` (`TSubclassOf<ANidalheimProjectileBase>`, par défaut une flèche visible) à `ProjectileSpeed` (3500 cm/s par défaut) ;
+- transporte les dégâts (`Damage = 25.f` par défaut) via un `EffectSpecHandle` (SetByCaller `Data.Damage`) porté par le projectile.
+
+> ⚠️ L'arc tique en continu pour suivre la corde pendant le bandage. Si l'arme change pendant un tir, le character annule l'ability ; `ActiveBow` garantit que le nettoyage (`EndAbility`) vise toujours l'arc du tir en cours, même si l'arme équipée a déjà changé.
+
+## Voir aussi
+
+- [Abilities GAS](/docs/unreal-engine/gas/abilities)
+- [Inventaire & hotbar](/docs/unreal-engine/inventory)
+- [PlayerCharacter](/docs/unreal-engine/characters/player)

@@ -1,0 +1,257 @@
+---
+title: IA ennemie & Behavior Tree
+---
+
+# IA ennemie & Behavior Tree
+
+IA des ennemis de Nidalheim — pilier **Combat (F16–F18)** de la beta Greenlight : détection du joueur, patrouille, poursuite et attaque au corps-à-corps via GAS. Le système repose sur quatre classes C++ dans `Source/Nidalheim/AI/` plus la cible `ANidalheimEnemyCharacter` dans `Source/Nidalheim/Character/`.
+
+> ⚠️ **Divergence majeure à connaître.** L'`ANidalheimAIController` réel **n'exécute pas** le Behavior Tree : il pilote une machine à états directement dans `Tick` (Idle / Chase / Search) via la perception UE et `AddMovementInput`. Les nodes C++ (`BTService_CombatUpdate`, `BTTask_*`) et l'asset `BT_Enemy_Base` existent **en parallèle** et restent référencés, mais le contrôleur ne les anime pas lui-même. Le commentaire d'en-tête le dit explicitement : clés Blackboard « encore référencées par les BT Tasks C++ historiques, conservés le temps de décider du sort du pipeline BehaviorTree ». Cette page documente les deux voies telles qu'elles sont dans le code, sans les réconcilier.
+
+## Vue d'ensemble
+
+```
+ANidalheimCharacterBase (GAS partagé)
+└── ANidalheimEnemyCharacter        (la cible : ASC, AttackAbility, WeaponsManager)
+        possédé par
+    ANidalheimAIController           (perception + machine à états en Tick)
+        BehaviorTree (asset BT_Enemy_Base, chargé à la possession)
+            ├── BTService_CombatUpdate       (détection + distance → Blackboard)
+            ├── BTTask_FindPatrolPoint       (patrouille)
+            ├── BTTask_ActivateAttackAbility (attaque GAS)
+            └── BTTask_ClearTarget           (perte de cible)
+```
+
+## ANidalheimAIController — perception & détection
+
+Le contrôleur configure un `UAIPerceptionComponent` avec un sens de vue (`UAISenseConfig_Sight`) dans son constructeur.
+
+```cpp
+// Source/Nidalheim/AI/NidalheimAIController.cpp
+UAISenseConfig_Sight* SightConfig = CreateDefaultSubobject<UAISenseConfig_Sight>(TEXT("SightConfig"));
+SightConfig->SightRadius = 1200.f;
+SightConfig->LoseSightRadius = 1500.f;
+SightConfig->PeripheralVisionAngleDegrees = 60.f;
+SightConfig->SetMaxAge(2.f); // oublie la cible ~2 s après la perte de vue -> bascule en recherche
+SightConfig->DetectionByAffiliation.bDetectEnemies    = true;
+SightConfig->DetectionByAffiliation.bDetectNeutrals   = true;
+SightConfig->DetectionByAffiliation.bDetectFriendlies = true;
+```
+
+> ⚠️ **Rayon de détection réel vs critère EIP F16 (15 m).** Le rayon d'**acquisition** (`SightRadius`) est **1200 cm = 12 m**. La cible n'est **perdue** qu'au-delà de `LoseSightRadius = 1500 cm = 15 m`. Le critère F16 « détection 15 m » correspond donc au rayon de perte de vue, **pas** au rayon d'acquisition. Le `BTService_CombatUpdate` utilise sa propre paire (`AggroRadius = 1200`, `DisengageRadius = 1600`), et `ANidalheimEnemyCharacter::AggroRange = 1200`. Il y a donc **trois** sources de rayon dans le code, non unifiées : à signaler avant toute démo F16.
+
+La perception ne décide rien elle-même : `OnTargetPerceptionUpdated` se contente de **mémoriser** la cible (`PerceivedTarget`, `bTargetVisible`, `LastKnownLocation`). Seuls les pawns contrôlés par un joueur sont retenus. Les transitions d'état sont décidées dans `Tick`, ce qui rend la machine insensible au scintillement *sensed / lost*.
+
+```cpp
+// Source/Nidalheim/AI/NidalheimAIController.cpp
+void ANidalheimAIController::OnTargetPerceptionUpdated(AActor* Actor, FAIStimulus Stimulus)
+{
+    APawn* ActorAsPawn = Cast<APawn>(Actor);
+    if (!ActorAsPawn || !ActorAsPawn->IsPlayerControlled()) return;
+
+    if (Stimulus.WasSuccessfullySensed())
+    {
+        PerceivedTarget = Actor;
+        bTargetVisible = true;
+        LastKnownLocation = Actor->GetActorLocation();
+    }
+    else
+    {
+        bTargetVisible = false;
+        LastKnownLocation = Stimulus.StimulusLocation; // dernière position perçue
+    }
+}
+```
+
+### Machine à états (Tick)
+
+Trois états : `Idle` (rien), `Chase` (joueur perçu, poursuite + attaque), `Search` (joueur perdu, investigation pendant 120 s). Constantes notables :
+
+| Paramètre | Valeur | Rôle |
+|-----------|--------|------|
+| `AttackCooldown` | `1.5 s` | Délai mini entre deux attaques |
+| `WeaponDrawDelay` | `0.8 s` | Attente après l'entrée en poursuite, le temps que le dégainage finisse |
+| `SearchDuration` | `120 s` | Durée d'investigation avant abandon |
+| `SearchRadius` | `800 cm` | Rayon de fouille autour de la dernière position vue |
+
+En poursuite, `TickChase` se déplace tant que la distance dépasse `AttackRange` **ou** que la ligne de vue est bloquée (`LineOfSightTo`), puis s'aligne sur le joueur. L'attaque n'est déclenchée que **bien aligné** (produit scalaire avant/cible `> 0.9`, soit ~25°) pour éviter de frapper dans le vide.
+
+```cpp
+// Source/Nidalheim/AI/NidalheimAIController.cpp
+const bool bFacing = FVector::DotProduct(Enemy->GetActorForwardVector(), ToTarget.GetSafeNormal2D()) > 0.9f;
+if (bFacing && Now >= WeaponReadyTime && Now - LastAttackTime >= AttackCooldown)
+{
+    LastAttackTime = Now;
+    Enemy->ActivateAttackAbility();
+}
+```
+
+Le déplacement utilise un suivi de chemin navmesh (`FindPathToLocationSynchronously`) propulsé par `AddMovementInput` — comme le joueur — pour alimenter l'`AnimBP` de course. Quand le joueur est mort (tag `State.Dead` sur son ASC), l'ennemi le lâche et rengaine.
+
+## ANidalheimEnemyCharacter — la cible
+
+Hérite de `ANidalheimCharacterBase`, donc dispose d'un `AbilitySystemComponent` (mode de réplication `Minimal`). Propriétés exposées clés :
+
+| Propriété | Type | Défaut | Rôle |
+|-----------|------|--------|------|
+| `EnemyType` | `EEnemyType` | `Melee` | `Melee` ou `Ranged` |
+| `BehaviorMode` | `EEnemyBehavior` | `Stationary` | `Stationary` ou `Patrol` |
+| `PatrolRadius` | `float` | `500` | Rayon des points de patrouille autour de `HomeLocation` |
+| `AttackRange` | `float` | `150` | Portée d'attaque (cm) |
+| `AggroRange` | `float` | `1200` | Rayon d'aggro (cm) |
+| `AttackAbility` | `TSubclassOf<UGameplayAbility>` | `UNidalheimEnemyMeleeAttackAbility` | Ability déclenchée à l'attaque |
+| `BehaviorTree` | `UBehaviorTree` | `BT_Enemy_Base` | BT chargé à la possession |
+
+Le constructeur fixe `AIControllerClass = ANidalheimAIController` et `AutoPossessAI = PlacedInWorldOrSpawned`, charge l'asset `BT_Enemy_Base`, équipe un `UNidalheimWeaponsManagerComponent` (épée par défaut, `bSwitchAnimClassOnEquip = false`), et grant la `UNidalheimDeathAbility` (sinon les ennemis ne meurent jamais).
+
+### Déclenchement de l'attaque GAS
+
+`ActivateAttackAbility()` grant l'ability à la volée si absente, puis l'active par classe :
+
+```cpp
+// Source/Nidalheim/Character/NidalheimEnemyCharacter.cpp
+void ANidalheimEnemyCharacter::ActivateAttackAbility()
+{
+    if (!AbilitySystemComponent || !AttackAbility) return;
+
+    if (!AbilitySystemComponent->FindAbilitySpecFromClass(AttackAbility))
+    {
+        AbilitySystemComponent->GiveAbility(FGameplayAbilitySpec(AttackAbility, 1, -1, this));
+    }
+
+    AbilitySystemComponent->TryActivateAbilityByClass(AttackAbility);
+}
+```
+
+`DrawWeapon()` / `SheathWeapon()` (idempotents, appelés par l'AIController à la détection / perte de vue) équipent ou rangent l'épée via le `WeaponsManager`. `HandleDeath()` diffuse `OnEnemyDied` (consommé par `UNidalheimQuestSubsystem` pour le comptage de kills), joue l'anim de mort puis passe en ragdoll. Voir [GAS — abilities](/docs/unreal-engine/gas/abilities) pour `UNidalheimEnemyMeleeAttackAbility`.
+
+## BTService_CombatUpdate
+
+Service destiné à tourner sur la branche d'attaque du BT (intervalle `0.1 s`, déviation `0.05 s`). Il fait sa **propre** détection — par distance + line trace, indépendamment du `UAIPerceptionComponent` — et écrit le résultat dans le Blackboard.
+
+| Paramètre | Défaut | Rôle |
+|-----------|--------|------|
+| `AggroRadius` | `1200` | Rayon d'aggro (détection) |
+| `DisengageRadius` | `1600` | Rayon de désengagement, plus grand pour éviter le yo-yo |
+| `LoseSightTickThreshold` | `5` | Ticks consécutifs hors vue avant perte (~0.5 s) |
+| `MinEngageDistance` | `0` | Ranged seulement : distance mini avant recul (`0` = melee) |
+| `RetreatDistance` | `500` | Ranged seulement : distance de repli |
+
+Logique : si le joueur est dans `CheckRadius` (= `DisengageRadius` s'il était déjà vu, sinon `AggroRadius`) et qu'il est soit à portée d'attaque (`AttackRange * 1.5`) soit en ligne de vue dégagée (line trace `ECC_Visibility` avec offset vertical +80), alors `bCanSeeNow = true`. Une **hystérésis** (`LoseSightTickThreshold`) évite de perdre la cible sur un seul tick masqué. À l'acquisition il `DrawWeapon()` + écrit `TargetActor` ; à la perte confirmée il `SheathWeapon()`. Il met aussi à jour `IsInAttackRange` selon `AttackRange`, et `TooClose` / `RetreatLocation` pour les ennemis Ranged.
+
+## Les trois BT Tasks
+
+### BTTask_FindPatrolPoint — patrouille
+
+Tire un point navmesh aléatoire dans `PatrolRadius` autour de `HomeLocation` et l'écrit dans `PatrolTargetLocation`. Fallback sur `HomeLocation` si aucun point atteignable.
+
+```cpp
+// Source/Nidalheim/AI/BTTask_FindPatrolPoint.cpp
+FVector HomeLocation = BB->GetValueAsVector(ANidalheimAIController::BBKey_HomeLocation);
+
+FNavLocation RandomPoint;
+if (NavSys->GetRandomReachablePointInRadius(HomeLocation, Enemy->PatrolRadius, RandomPoint))
+{
+    BB->SetValueAsVector(ANidalheimAIController::BBKey_PatrolTargetLocation, RandomPoint.Location);
+    return EBTNodeResult::Succeeded;
+}
+```
+
+### BTTask_ActivateAttackAbility — attaque GAS
+
+Appelle `Enemy->ActivateAttackAbility()`, vérifie que le spec est actif, puis reste `InProgress` (latent, `bNotifyTick`) jusqu'à ce que `TickTask` détecte la fin de l'ability (spec plus actif) → `Succeeded`. Retourne `Failed` si l'ability ne démarre pas.
+
+```cpp
+// Source/Nidalheim/AI/BTTask_ActivateAttackAbility.cpp
+Enemy->ActivateAttackAbility();
+
+FGameplayAbilitySpec* Spec = ASC->FindAbilitySpecFromClass(Enemy->AttackAbility);
+Mem->bWasActivated = Spec && Spec->IsActive();
+
+if (!Mem->bWasActivated)
+    return EBTNodeResult::Failed;
+
+return EBTNodeResult::InProgress; // TickTask finira la tâche à la fin de l'ability
+```
+
+### BTTask_ClearTarget — perte de cible
+
+Efface `TargetActor`, `CanSeeTarget` et `IsInAttackRange` du Blackboard. À placer en fin de branche poursuite, une fois la dernière position connue atteinte.
+
+```cpp
+// Source/Nidalheim/AI/BTTask_ClearTarget.cpp
+BB->ClearValue(ANidalheimAIController::BBKey_TargetActor);
+BB->ClearValue(ANidalheimAIController::BBKey_CanSeeTarget);
+BB->ClearValue(ANidalheimAIController::BBKey_IsInAttackRange);
+```
+
+## Tableau des nodes BT
+
+| Node | Type | Rôle |
+|------|------|------|
+| `BTService_CombatUpdate` | Service (`0.1 s`) | Détection distance + line trace, écrit `TargetActor` / `CanSeeTarget` / `IsInAttackRange` ; `TooClose` / `RetreatLocation` pour Ranged ; `DrawWeapon`/`SheathWeapon` |
+| `BTTask_FindPatrolPoint` | Task | Point navmesh aléatoire dans `PatrolRadius` → `PatrolTargetLocation` |
+| `BTTask_ActivateAttackAbility` | Task (latent) | Active l'`AttackAbility` GAS, attend sa fin |
+| `BTTask_ClearTarget` | Task | Efface `TargetActor` / `CanSeeTarget` / `IsInAttackRange` |
+
+## Clés Blackboard
+
+Déclarées comme `static const FName` sur `ANidalheimAIController` et partagées par les nodes BT.
+
+| Clé | Type | Écrite par | Rôle |
+|-----|------|------------|------|
+| `TargetActor` | Object | CombatUpdate / ClearTarget | Cible courante (joueur) |
+| `CanSeeTarget` | Bool | CombatUpdate / ClearTarget | Cible actuellement visible |
+| `HomeLocation` | Vector | (config) | Ancre de patrouille |
+| `PatrolTargetLocation` | Vector | FindPatrolPoint | Point de patrouille tiré |
+| `AttackRange` | Float | (config) | Portée d'attaque |
+| `IsPatrolling` | Bool | — | Drapeau patrouille |
+| `IsInAttackRange` | Bool | CombatUpdate / ClearTarget | Cible à portée |
+| `TooClose` | Bool | CombatUpdate | Ranged : joueur trop proche (reculer) |
+| `RetreatLocation` | Vector | CombatUpdate | Ranged : position de repli |
+
+## Boucle de combat
+
+Telle qu'implémentée dans la machine à états du contrôleur (`Tick`) :
+
+```
+IDLE
+  │  perception : joueur perçu (SightRadius = 12 m)
+  ▼
+CHASE
+  │  DrawWeapon (idempotent) + délai WeaponDrawDelay (0.8 s)
+  │  navmesh → AddMovementInput vers le joueur
+  │  si Dist > AttackRange OU pas de ligne de vue → continuer à se déplacer
+  │  sinon : s'aligner (~25°), puis ActivateAttackAbility() sur cooldown (1.5 s)
+  │
+  │  joueur plus perçu (> LoseSightRadius = 15 m, ou MaxAge 2 s)
+  ▼
+SEARCH (≤ 120 s)
+  │  va à LastKnownLocation, regarde par à-coups (±110°)
+  │  puis points navmesh aléatoires dans SearchRadius (800 cm)
+  │  ── joueur re-perçu → CHASE
+  │  ── timeout (SearchDuration) → SheathWeapon → IDLE
+  ▼
+IDLE
+```
+
+Et la boucle telle que **prévue par le BT** (nodes C++, voie historique parallèle) :
+
+```
+PATROUILLE   FindPatrolPoint → MoveTo(PatrolTargetLocation)
+   │  CombatUpdate détecte le joueur (AggroRadius 1200) → TargetActor / CanSeeTarget
+   ▼
+POURSUITE    MoveTo(TargetActor) tant que !IsInAttackRange
+   │  IsInAttackRange == true
+   ▼
+ATTAQUE      ActivateAttackAbility (latent) ; CombatUpdate maintient distance/visibilité
+   │  joueur perdu (LoseSightTickThreshold ticks hors vue, DisengageRadius 1600)
+   ▼
+CLEAR        ClearTarget → retour PATROUILLE
+```
+
+## Voir aussi
+
+- [GAS — abilities](/docs/unreal-engine/gas/abilities) — `UNidalheimEnemyMeleeAttackAbility` et le système d'attaque
+- [NPCCharacter](/docs/unreal-engine/characters/npc) — l'autre branche de l'IA (PNJ conversationnels)
+- [GAS](/docs/unreal-engine/gas) — vue d'ensemble du Gameplay Ability System

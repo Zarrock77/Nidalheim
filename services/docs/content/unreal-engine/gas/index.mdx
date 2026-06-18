@@ -1,0 +1,340 @@
+---
+title: Gameplay Ability System
+---
+
+# Gameplay Ability System — Aperçu
+
+Le projet utilise une stack GAS Epic standard, entièrement en C++, sous la convention de nommage `Nidalheim*`. Tout part de `ANidalheimCharacterBase` (l'ASC, les attribute sets, les abilities de départ) et de son ASC dérivé `UNidalheimAbilitySystemComponent`.
+
+> ⚠️ **Divergence avec l'archi EIP documentée.** Le document `Nidalheim_Context_Cowork.docx` décrit un `AC_AIBrain` (HTTP REST vers une API IA) et un GAS principalement piloté en Blueprint (`BP_NPC_AI`). L'implémentation réelle est différente : GAS **100% C++** sous convention `Nidalheim*`, sans `AC_AIBrain`. L'IA conversationnelle des PNJ passe par WebSocket vers `api-game` (voir [NPCCharacter](/docs/unreal-engine/characters/npc)), pas par un component GAS. Suivre le code réel quand on touche à l'implémentation.
+
+## La stack GAS du projet
+
+```
+UAbilitySystemComponent (Epic)
+└── UNidalheimAbilitySystemComponent   (détection de changement d'abilities → event UI)
+
+ACharacter (Unreal) + IAbilitySystemInterface
+└── ANidalheimCharacterBase            (ASC + AttributeSets + StartingAbilities)
+
+UGameplayAbility (Epic)
+└── UNidalheimGameplayAbility          (InputID, icône UI, auto-activation, tags d'activation)
+
+UAttributeSet (Epic)
+├── UNidalheimBasicAttributeSet        (Health / Stamina / Shield / Damage)
+├── UNidalheimCombatAttributeSet       (Armor / Strength)
+└── UNidalheimSurvivalAttributeSet     (Hunger / Thirst)
+```
+
+> ⚠️ Il n'existe qu'**un seul** système GAS dans le projet : tout est en `Nidalheim*` sous `AbilitySystem/`. L'ancienne variante `Base*` (`GameplayAbilitySystem/`) a été supprimée — toute référence à `Base*` est périmée.
+
+## `UNidalheimAbilitySystemComponent`
+
+L'ASC dérivé ajoute peu de chose au `UAbilitySystemComponent` Epic : il override `OnRep_ActivateAbilities()` pour détecter, côté client, quand la liste d'abilities octroyées change, et déclencher un rafraîchissement de l'UI (barre d'abilities).
+
+```cpp
+// Source/Nidalheim/AbilitySystem/NidalheimAbilitySystemComponent.h
+UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
+class NIDALHEIM_API UNidalheimAbilitySystemComponent : public UAbilitySystemComponent
+{
+    GENERATED_BODY()
+
+protected:
+    TArray<FGameplayAbilitySpec> LastActivatableAbilities;
+
+    virtual void BeginPlay() override;
+    void OnRep_ActivateAbilities() override;
+public:
+    virtual void TickComponent(float DeltaTime, ELevelTick TickType,
+                               FActorComponentTickFunction* ThisTickFunction) override;
+};
+```
+
+Le corps de l'override compare l'ancienne liste (`LastActivatableAbilities`) à la nouvelle (`ActivatableAbilities.Items`). S'il y a un écart, il prévient le character :
+
+```cpp
+// Source/Nidalheim/AbilitySystem/NidalheimAbilitySystemComponent.cpp
+void UNidalheimAbilitySystemComponent::OnRep_ActivateAbilities()
+{
+    Super::OnRep_ActivateAbilities();
+
+    ANidalheimCharacterBase *Character = Cast<ANidalheimCharacterBase>(GetOwner());
+    if (!Character) return ;
+
+    bool bAbilitiesChanged = false;
+    if (LastActivatableAbilities.Num() != ActivatableAbilities.Items.Num())
+    {
+        bAbilitiesChanged = true;
+    }
+    else
+    {
+        for (int32 i = 0; i < LastActivatableAbilities.Num(); i++)
+        {
+            if (LastActivatableAbilities[i].Ability != ActivatableAbilities.Items[i].Ability)
+            {
+                bAbilitiesChanged = true;
+                break;
+            }
+        }
+    }
+    if (bAbilitiesChanged)
+    {
+        Character->SendAbilitiesChangedEvent();
+        LastActivatableAbilities = ActivatableAbilities.Items;
+    }
+}
+```
+
+| Membre | Rôle |
+|---|---|
+| `LastActivatableAbilities` | Snapshot de la dernière liste d'abilities connue (pour diff côté client) |
+| `OnRep_ActivateAbilities()` | Détecte un changement de liste répliqué → appelle `SendAbilitiesChangedEvent()` sur le character |
+| `BeginPlay()` / `TickComponent()` | Override présents mais appellent uniquement `Super::` (tick activé dans le constructeur) |
+
+## `ANidalheimCharacterBase`
+
+Classe de base de tous les personnages (joueur, ennemi, PNJ). Elle implémente `IAbilitySystemInterface` et porte l'ASC + les attribute sets.
+
+```cpp
+// Source/Nidalheim/Character/NidalheimCharacterBase.h
+UCLASS()
+class NIDALHEIM_API ANidalheimCharacterBase : public ACharacter, public IAbilitySystemInterface
+{
+    GENERATED_BODY()
+public:
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "AbilitySystem")
+    UAbilitySystemComponent* AbilitySystemComponent;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "AbilitySystem")
+    class UNidalheimBasicAttributeSet* BasicAttributeSet;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "AbilitySystem")
+    class UNidalheimCombatAttributeSet* CombatAttributeSet;
+
+protected:
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AbilitySystem")
+    EGameplayEffectReplicationMode AscReplicationMode = EGameplayEffectReplicationMode::Mixed;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "AbilitySystem")
+    TArray<TSubclassOf<UGameplayAbility>> StartingAbilities;
+};
+```
+
+### Construction de l'ASC et des attribute sets
+
+L'ASC et les deux attribute sets sont créés dans le constructeur. L'ASC est répliqué, en mode `Mixed` par défaut.
+
+```cpp
+// Source/Nidalheim/Character/NidalheimCharacterBase.cpp
+AbilitySystemComponent = CreateDefaultSubobject<UNidalheimAbilitySystemComponent>(TEXT("AbilitySystemComponent"));
+AbilitySystemComponent->SetIsReplicated(true);
+AbilitySystemComponent->SetReplicationMode(AscReplicationMode);
+
+// ...
+
+BasicAttributeSet  = CreateDefaultSubobject<UNidalheimBasicAttributeSet>(TEXT("BasicAttributeSet"));
+CombatAttributeSet = CreateDefaultSubobject<UNidalheimCombatAttributeSet>(TEXT("CombatAttributeSet"));
+```
+
+> ⚠️ Deux attribute sets seulement sont instanciés ici (`BasicAttributeSet`, `CombatAttributeSet`). `UNidalheimSurvivalAttributeSet` existe dans `AbilitySystem/Attributes/` mais n'est **pas** attaché par la classe de base — il est géré ailleurs (pilier Survie). Aucun `GameplayEffect` de départ n'est appliqué par `ANidalheimCharacterBase` : l'init des valeurs d'attributs se fait au niveau des attribute sets / sous-classes, pas via un GE de départ posé par la base.
+
+### Lifecycle — `InitAbilityActorInfo` côté serveur ET client
+
+L'ASC est initialisé des deux côtés du réseau :
+
+- **Serveur** : `PossessedBy` est appelé à la possession → init + octroi des `StartingAbilities`.
+- **Client** : `OnRep_PlayerState` réinitialise l'actor info quand le PlayerState est répliqué.
+
+```cpp
+// Source/Nidalheim/Character/NidalheimCharacterBase.cpp
+void ANidalheimCharacterBase::PossessedBy(AController* NewController)
+{
+    Super::PossessedBy(NewController);
+    if (AbilitySystemComponent)
+    {
+        AbilitySystemComponent->InitAbilityActorInfo(this, this);
+        GrantAbilities(StartingAbilities);
+    }
+}
+
+void ANidalheimCharacterBase::OnRep_PlayerState()
+{
+    Super::OnRep_PlayerState();
+    if (AbilitySystemComponent)
+    {
+        AbilitySystemComponent->InitAbilityActorInfo(this, this);
+    }
+}
+```
+
+Ici l'Owner et l'Avatar de l'actor info sont **le même acteur** (`this, this`) : l'ASC vit sur le pawn, pas sur le PlayerState.
+
+```
+[Serveur]  PossessedBy(Controller)
+             → InitAbilityActorInfo(this, this)
+             → GrantAbilities(StartingAbilities)   (HasAuthority requis)
+
+[Client]   OnRep_PlayerState()
+             → InitAbilityActorInfo(this, this)
+
+[Client]   OnRep_ActivateAbilities()  (réplication des specs)
+             → diff → SendAbilitiesChangedEvent()  → refresh UI
+```
+
+### Octroi des abilities — `GrantAbilities`
+
+`GrantAbilities` est l'API d'octroi. Elle ne s'exécute que côté autorité, lit l'`AbilityInputID` et le flag `AutoActivateWhenGranted` depuis le CDO de chaque `UNidalheimGameplayAbility`, puis appelle `GiveAbility` (et `TryActivateAbility` si auto-activation).
+
+```cpp
+// Source/Nidalheim/Character/NidalheimCharacterBase.cpp
+TArray<FGameplayAbilitySpecHandle> ANidalheimCharacterBase::GrantAbilities(
+    TArray<TSubclassOf<UGameplayAbility>> AbilitiesToGrant, const int32 Level)
+{
+    if (!AbilitySystemComponent || !HasAuthority())
+        return TArray<FGameplayAbilitySpecHandle>();
+
+    TArray<FGameplayAbilitySpecHandle> AbilityHandles;
+    for (TSubclassOf<UGameplayAbility> Ability : AbilitiesToGrant)
+    {
+        if (!Ability) { /* skip null + warning */ continue; }
+
+        int32 InputID = -1;
+        bool ShouldActivate = false;
+        if (const UNidalheimGameplayAbility* NexusAbilityCDO = GetDefault<UNidalheimGameplayAbility>(Ability))
+        {
+            InputID = static_cast<int32>(NexusAbilityCDO->AbilityInputID);
+            ShouldActivate = NexusAbilityCDO->AutoActivateWhenGranted;
+        }
+
+        FGameplayAbilitySpecHandle SpecHandle = AbilitySystemComponent->GiveAbility(
+            FGameplayAbilitySpec(Ability, Level, InputID, this));
+        AbilityHandles.Add(SpecHandle);
+
+        if (ShouldActivate)
+            AbilitySystemComponent->TryActivateAbility(SpecHandle);
+    }
+
+    SendAbilitiesChangedEvent();
+    return AbilityHandles;
+}
+```
+
+| Fonction | Rôle |
+|---|---|
+| `GrantAbilities(...)` | Octroie des abilities (autorité only), lit InputID + auto-activation depuis le CDO |
+| `RemoveAbilities(...)` | `ClearAbility` pour chaque handle (autorité only), puis `SendAbilitiesChangedEvent()` |
+| `SendAbilitiesChangedEvent()` | Envoie l'event GAS `Event.Abilities.Changed` à soi-même (refresh UI) |
+| `ServerSendGameplayEventToSelf(...)` | RPC `Server, Reliable` — relaie un `FGameplayEventData` vers soi-même |
+| `MultiSendGameplayEventToActor(...)` | RPC `NetMulticast, Reliable` — relaie un event vers un acteur cible |
+| `GetAbilitySystemComponent()` | Implémentation de `IAbilitySystemInterface` — renvoie l'ASC |
+
+### Mort via GameplayTag
+
+`BeginPlay` abonne le character au tag `State.Dead`. Quand son compteur passe au-dessus de 0, `HandleDeath` (BlueprintNativeEvent) déclenche le ragdoll.
+
+```cpp
+// Source/Nidalheim/Character/NidalheimCharacterBase.cpp
+void ANidalheimCharacterBase::BeginPlay()
+{
+    Super::BeginPlay();
+    AbilitySystemComponent->RegisterGameplayTagEvent(FGameplayTag::RequestGameplayTag("State.Dead"))
+        .AddUObject(this, &ANidalheimCharacterBase::OnDeadTagChanged);
+}
+```
+
+## `UNidalheimGameplayAbility`
+
+Classe de base de toutes les abilities. Elle ajoute des métadonnées d'UI, un InputID typé et configure ses tags d'activation dès le constructeur.
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Abilities/NidalheimGameplayAbility.h
+UENUM(BlueprintType)
+enum class EAbilityInputID : uint8
+{
+    None             UMETA(DisplayName = "None"),              // 0
+    PrimaryAbility   UMETA(DisplayName = "Primary Ability"),   // 1
+    SecondaryAbility UMETA(DisplayName = "Secondary Ability"), // 2
+    DefensiveAbility UMETA(DisplayName = "Defensive Ability"), // 3
+    MovementAbility  UMETA(DisplayName = "Movement Ability"),  // 4
+};
+
+UCLASS()
+class NIDALHEIM_API UNidalheimGameplayAbility : public UGameplayAbility
+{
+    GENERATED_BODY()
+public:
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UI")
+    bool ShouldShowInAbilitiesBar = false;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UI")
+    TObjectPtr<UTexture2D> AbilityIcon = nullptr;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Activation")
+    bool AutoActivateWhenGranted = false;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input")
+    EAbilityInputID AbilityInputID = EAbilityInputID::None;
+    // ...
+};
+```
+
+Le constructeur pose deux tags : l'ability se marque `GameplayAbility.Active` pendant qu'elle tourne, et est bloquée si le porteur a `State.Dead`.
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Abilities/NidalheimGameplayAbility.cpp
+UNidalheimGameplayAbility::UNidalheimGameplayAbility()
+{
+    ActivationOwnedTags.AddTag(FGameplayTag::RequestGameplayTag(FName("GameplayAbility.Active")));
+    ActivationBlockedTags.AddTag(FGameplayTag::RequestGameplayTag("State.Dead"));
+}
+```
+
+| Membre | Rôle |
+|---|---|
+| `ShouldShowInAbilitiesBar` | Affichage dans la barre d'abilities de l'UI |
+| `AbilityIcon` (`TObjectPtr<UTexture2D>`) | Icône UI (remplace l'ancien lookup `DT_AbilityMetaData`) |
+| `AutoActivateWhenGranted` | Active l'ability dès l'octroi (lu par `GrantAbilities`) |
+| `AbilityInputID` (`EAbilityInputID`) | Slot d'input mappé sur le spec lors de `GiveAbility` |
+| `SetAbilityLevel(int32)` | Modifie le `Level` du spec courant |
+| `HasPC()` | Vrai si l'avatar est un pawn possédé par un `APlayerController` |
+
+## GameplayTags natifs
+
+Tous les tags du projet sont déclarés nativement en C++ (`UE_DECLARE_GAMEPLAY_TAG_EXTERN` / `UE_DEFINE_GAMEPLAY_TAG`) dans `Core/NidalheimGameplayTags`. Raison documentée : un tag littéral posé en Blueprint peut référencer un tag non enregistré (résolution vide au runtime) ; en natif ils sont garantis enregistrés, autocomplétés et impossibles à mal orthographier.
+
+| Catégorie | Constante C++ | Chaîne du tag |
+|---|---|---|
+| Armes | `Weapon_Melee_Sword` | `Weapon.Melee.Sword` |
+| Armes | `Weapon_Ranged_Bow` | `Weapon.Ranged.Bow` |
+| Armes | `Weapon_Magic_Staff` | `Weapon.Magic.Staff` |
+| Événements GAS | `Event_ActivateAbility_EquipWeapon` | `Event.ActivateAbility.EquipWeapon` |
+| État / activation | `GameplayAbility_Active` | `GameplayAbility.Active` |
+| État / activation | `GameplayAbility_HitReaction` | `GameplayAbility.HitReaction` |
+| État / activation | `GameplayAbility_Death` | `GameplayAbility.Death` |
+| État / activation | `State_Dead` | `State.Dead` |
+| Données SetByCaller | `Data_Damage` | `Data.Damage` |
+| Effets / cues | `Effects_HitReaction` | `Effects.HitReaction` |
+| Effets / cues | `Status_Buff_Shield` | `Status.Buff.Shield` |
+| Effets / cues | `GameplayCue_ShieldUp` | `GameplayCue.ShieldUp` |
+| Effets / cues | `GameplayCue_ShieldDown` | `GameplayCue.ShieldDown` |
+| Survie (F19-F24) | `Status_Debuff_Starving` | `Status.Debuff.Starving` |
+| Survie (F19-F24) | `Status_Debuff_Dehydrated` | `Status.Debuff.Dehydrated` |
+| Survie (F19-F24) | `Status_Debuff_Exhausted` | `Status.Debuff.Exhausted` |
+
+```cpp
+// Source/Nidalheim/Core/NidalheimGameplayTags.cpp
+UE_DEFINE_GAMEPLAY_TAG(GameplayAbility_Active, "GameplayAbility.Active");
+UE_DEFINE_GAMEPLAY_TAG(State_Dead, "State.Dead");
+UE_DEFINE_GAMEPLAY_TAG(Data_Damage, "Data.Damage");
+UE_DEFINE_GAMEPLAY_TAG(Status_Buff_Shield, "Status.Buff.Shield");
+UE_DEFINE_GAMEPLAY_TAG(Status_Debuff_Starving, "Status.Debuff.Starving");
+// ...
+```
+
+> ⚠️ Le code mélange deux façons de référencer les tags. Les tags natifs ci-dessus sont la **source de vérité**, mais plusieurs sites d'appel (constructeur d'ability, `BeginPlay`, `SendAbilitiesChangedEvent`) utilisent encore `FGameplayTag::RequestGameplayTag("...")` avec la chaîne en dur — y compris `Event.Abilities.Changed`, qui n'a **pas** de constante native déclarée. Préférer les constantes `NidalheimGameplayTags::*` pour tout nouveau code.
+
+## Voir aussi
+
+- [GAS — Attributs](/docs/unreal-engine/gas/attributes) — les attribute sets `Basic` / `Combat` / `Survival`
+- [GAS — Abilities](/docs/unreal-engine/gas/abilities) — les abilities concrètes (mêlée, dash, shield, etc.)
+- [PlayerCharacter](/docs/unreal-engine/characters/player) — le pion joueur dérivé de `ANidalheimCharacterBase`

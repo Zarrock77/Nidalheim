@@ -1,0 +1,191 @@
+---
+title: Persistance & systèmes de jeu
+---
+
+# Persistance & systèmes de jeu
+
+Cette page documente les classes système du client UE5 : la sauvegarde par slot (`UNidalheimSaveGame` + `UNidalheimSaveSubsystem`), le `UNidalheimGameInstance` global et les deux GameModes (`ANidalheimGameMode` pour le jeu, `ANidalheimMenuGameMode` pour le menu).
+
+> ⚠️ **Hors scope beta EIP.** La sauvegarde/chargement est listée **hors scope beta** dans le `CLAUDE.md` racine (post-Greenlight). Pourtant, `UNidalheimSaveSubsystem` + `UNidalheimSaveGame` existent déjà et implémentent `SaveToSlot` / `LoadFromSlot` / `DoesSaveExist`. C'est donc un système **en avance de phase** et **partiel** : ne pas en déduire qu'il s'agit d'une feature Greenlight validée. Voir la section « Limites » plus bas.
+
+## `UNidalheimSaveGame` — données sauvegardées
+
+Le `SaveGame` dérive de `USaveGame`. Schéma C++ minimal — il ne sauvegarde que la position du joueur et l'état de l'arbre de talents.
+
+```cpp
+// Source/Nidalheim/System/NidalheimSaveGame.h
+UCLASS()
+class NIDALHEIM_API UNidalheimSaveGame : public USaveGame
+{
+    GENERATED_BODY()
+
+public:
+    UPROPERTY()
+    FVector PlayerLocation = FVector::ZeroVector;
+
+    UPROPERTY()
+    FRotator PlayerRotation = FRotator::ZeroRotator;
+
+    UPROPERTY()
+    int32 TalentPoints = 0;
+
+    UPROPERTY()
+    TArray<FName> UnlockedTalentIds;
+
+    UPROPERTY()
+    FDateTime SavedAt;
+};
+```
+
+| Champ | Type | Contenu |
+|-------|------|---------|
+| `PlayerLocation` | `FVector` | Position monde du pawn joueur au moment de la sauvegarde |
+| `PlayerRotation` | `FRotator` | Rotation monde du pawn joueur |
+| `TalentPoints` | `int32` | Points de talent disponibles (`GetPointsAvailable`) |
+| `UnlockedTalentIds` | `TArray<FName>` | **Noms** des talents accordés (pas leurs niveaux) |
+| `SavedAt` | `FDateTime` | Horodatage de la sauvegarde (`FDateTime::Now()`) |
+
+> ⚠️ **Quirk conservé d'origine.** Seuls les **noms** des talents sont sauvegardés, pas leurs niveaux. Au rechargement, chaque talent reconstruit repart **niveau 1**. Ce comportement reproduit volontairement celui du Blueprint d'origine (`GetGrantedTalentsByName`).
+
+## `UNidalheimSaveSubsystem` — save/load par slot
+
+Sous-système du `GameInstance` (`UGameInstanceSubsystem`). Il remplace les anciens `BFL_SaveGameFunction` / `BPC_SaveComp`. API exposée Blueprint :
+
+```cpp
+// Source/Nidalheim/System/NidalheimSaveSubsystem.h
+UFUNCTION(BlueprintCallable, Category = "Save")
+bool SaveToSlot(const FString& SlotName);
+
+UFUNCTION(BlueprintCallable, Category = "Save")
+bool LoadFromSlot(const FString& SlotName);
+
+UFUNCTION(BlueprintPure, Category = "Save")
+bool DoesSaveExist(const FString& SlotName) const;
+```
+
+| Méthode | Rôle | Retour |
+|---------|------|--------|
+| `SaveToSlot(SlotName)` | Capture l'état du pawn + talents, écrit le slot (index utilisateur `0`) | `false` si pas de pawn ou échec d'écriture |
+| `LoadFromSlot(SlotName)` | Lit le slot, repositionne le pawn, ré-initialise l'arbre de talents | `false` si slot absent ou pas de pawn |
+| `DoesSaveExist(SlotName)` | Délègue à `UGameplayStatics::DoesSaveGameExist` | `true` si le slot existe |
+
+### Quand ça sauvegarde
+
+Il n'y a **pas** de sauvegarde automatique : `SaveToSlot` doit être appelé explicitement (Blueprint ou C++). Le sous-système ne s'abonne à aucun event de jeu. La sauvegarde lit l'état directement depuis le pawn joueur courant.
+
+```cpp
+// Source/Nidalheim/System/NidalheimSaveSubsystem.cpp
+Save->PlayerLocation = Pawn->GetActorLocation();
+Save->PlayerRotation = Pawn->GetActorRotation();
+Save->SavedAt = FDateTime::Now();
+if (const UNidalheimTalentTreeComponent* Talents = Pawn->FindComponentByClass<UNidalheimTalentTreeComponent>())
+{
+    Save->TalentPoints = Talents->GetPointsAvailable();
+    Save->UnlockedTalentIds.Reset();
+    Talents->GetGrantedTalentsByName().GetKeys(Save->UnlockedTalentIds);
+}
+```
+
+Au chargement, le pawn est repositionné puis l'arbre de talents est reconstruit par nom (via `UNidalheimGameInstance::FindTalent`) et ré-initialisé avec les points sauvegardés :
+
+```cpp
+// Source/Nidalheim/System/NidalheimSaveSubsystem.cpp
+Pawn->SetActorLocationAndRotation(Save->PlayerLocation, Save->PlayerRotation);
+// ... reconstruit les talents (niveau 1) via GI->FindTalent(TalentName) ...
+Talents->Initialize(SavedTalents, Save->TalentPoints);
+```
+
+> ⚠️ La résolution des talents au chargement dépend de `UNidalheimGameInstance` : si le pawn n'a pas pour `GameInstance` un `UNidalheimGameInstance`, la liste `SavedTalents` reste vide et seuls la position et les points sont restaurés.
+
+## `UNidalheimGameInstance` — rôle global
+
+Le `GameInstance` (ex-`BP_NidalheimGameInstance`) découvre et indexe **tous les talents** au démarrage, dans `Init()`. Cet index est la source consommée par le menu d'arbre de talents et par le chargement de sauvegarde.
+
+```cpp
+// Source/Nidalheim/System/NidalheimGameInstance.cpp
+void UNidalheimGameInstance::Init()
+{
+    Super::Init();
+    DiscoverTalents();
+}
+```
+
+`DiscoverTalents()` reconstruit les talents **en C++** (les anciens DataAssets `DA_Talent_*` n'étaient pas chargeables après le redirect Blueprint vers C++) et les stocke dans une map indexée par `FName` :
+
+```cpp
+// Source/Nidalheim/System/NidalheimGameInstance.h
+UPROPERTY(Transient)
+TMap<FName, TObjectPtr<UNidalheimTalentDataAsset>> TalentDataAssetsByName;
+```
+
+API exposée :
+
+| Méthode | Rôle |
+|---------|------|
+| `GetAllTalents()` | Renvoie tous les talents découverts (lu par `W_TalentTree` pour peupler la grille) |
+| `FindTalent(TalentName)` | Résout un talent par son `FName` (utilisé au chargement par `LoadFromSlot`) |
+
+Les talents reconstruits (`Dash`, `Sword Combo`, `Sword Swing`, `Fill Shields`, `Stamina Regen`, `Max Health`, `Max Stamina`) reprennent fidèlement les données d'origine (nom, icônes, abilities/effects octroyés, niveaux, coûts), typos comprises.
+
+## GameModes
+
+Deux GameModes dérivent de `AGameModeBase`, un par niveau (jeu vs menu).
+
+| GameMode | Niveau | `DefaultPawnClass` | `PlayerControllerClass` | UI / HUD |
+|----------|--------|--------------------|-------------------------|----------|
+| `ANidalheimGameMode` | Jeu (MainLevel) | `ANidalheimPlayerCharacter` | `ANidalheimPlayerController` | aucun HUD défini dans le GameMode |
+| `ANidalheimMenuGameMode` | Menu (MainMenuLevel) | hérité (`AGameModeBase` par défaut) | hérité (par défaut) | `UNidalheimMainMenuWidget` créé au `BeginPlay` |
+
+### `ANidalheimGameMode` (jeu)
+
+Le GameMode principal câble pawn et controller du jeu directement dans son constructeur :
+
+```cpp
+// Source/Nidalheim/System/NidalheimGameMode.cpp
+ANidalheimGameMode::ANidalheimGameMode()
+{
+    DefaultPawnClass = ANidalheimPlayerCharacter::StaticClass();
+    PlayerControllerClass = ANidalheimPlayerController::StaticClass();
+}
+```
+
+Il ne définit pas de `HUDClass` : le HUD du jeu (`UNidalheimPlayerHUDWidget` et ses widgets enfants) est géré ailleurs, pas par le GameMode.
+
+### `ANidalheimMenuGameMode` (menu)
+
+Le GameMode du menu ne surcharge ni pawn ni controller (valeurs par défaut de `AGameModeBase`). Il crée le widget de menu principal au `BeginPlay`, l'ajoute au viewport et bascule l'input en UI-only :
+
+```cpp
+// Source/Nidalheim/System/NidalheimMenuGameMode.cpp
+void ANidalheimMenuGameMode::BeginPlay()
+{
+    Super::BeginPlay();
+
+    APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
+    if (PC && MenuWidgetClass)
+    {
+        MenuWidget = CreateWidget<UNidalheimMainMenuWidget>(PC, MenuWidgetClass);
+        if (MenuWidget)
+        {
+            MenuWidget->AddToViewport(0);
+            PC->SetInputMode(FInputModeUIOnly());
+            PC->bShowMouseCursor = true;
+        }
+    }
+}
+```
+
+La classe du widget (`MenuWidgetClass`) est exposée `EditDefaultsOnly` et vaut par défaut `UNidalheimMainMenuWidget::StaticClass()`.
+
+## Limites & avance de phase
+
+- **Hors scope beta** : ce système de sauvegarde n'est pas une feature Greenlight validée — il existe probablement pour le support du menu et reste partiel.
+- **Couverture partielle** : seuls position/rotation du pawn + état des talents sont persistés. Inventaire, hotbar, jauges de survie (faim/soif/santé), état des quêtes et progression GAS ne sont **pas** sauvegardés.
+- **Talents niveau 1 au rechargement** : conséquence directe du fait que seuls les noms sont stockés (quirk d'origine conservé).
+- **Index utilisateur fixe `0`** : tous les appels passent par l'index `0` (`UGameplayStatics::*GameToSlot(..., 0)`) — pas de multi-profil.
+- **Pas de déclencheur automatique** : aucune sauvegarde périodique ni à un checkpoint ; l'appel est manuel.
+
+## Voir aussi
+
+- [Vue d'ensemble Unreal Engine](/docs/unreal-engine/overview)
+- [Personnage joueur](/docs/unreal-engine/characters/player)

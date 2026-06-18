@@ -4,10 +4,14 @@ title: Aperçu
 
 # Client UE5 — Aperçu
 
-Le client jeu Unreal Engine 5.6 (`Nidalheim.uproject`) vit dans un **depot Perforce séparé** du monorepo backend. Le depot s'appelle `main` et est hébergé sur le VPS Epitech (cf [Workflow Perforce](/docs/unreal-engine/perforce)). Côté dev local, le stream/workspace s'appelle `JJ_main` (chemin par défaut `C:\Users\jj\Perforce\JJ_main\`). Il consomme les services backend documentés dans le reste de cette doc :
+Le client jeu Unreal Engine 5.6 (`Nidalheim.uproject`) vit dans un **depot Perforce séparé** du monorepo backend (cf [Workflow Perforce](/docs/unreal-engine/perforce)). Il consomme les services backend documentés dans le reste de cette doc :
 
 - **`api-auth`** via REST + Device Authorization Grant pour l'auth joueur ([détails](/docs/unreal-engine/auth))
-- **`api-game`** via WebSocket `/text` et `/audio` pour les PNJ pilotés par IA ([voice pipeline](/docs/backend/voice-pipeline))
+- **`api-game`** via WebSocket `/text` et `/audio` pour les PNJ pilotés par IA ([voice pipeline](/docs/backend/voice-pipeline)) et la **génération de quêtes contextuelles** ([Quêtes](/docs/unreal-engine/quests))
+
+Le module de gameplay est entièrement en **C++** (convention `Nidalheim*`), les Blueprints ne portant que la config visuelle, l'input, les animations et les callbacks.
+
+> ⚠️ **Divergence avec l'archi EIP documentée.** Le document de contexte Cowork décrit un `AC_AIBrain` (Actor Component faisant des appels REST IA + TTS) et un GAS en Blueprint. L'**implémentation réelle** diverge : le GAS est **100 % C++**, et toute l'IA (LLM + STT + TTS + génération de quête) passe par `api-game` via WebSocket — pas d'appel REST direct UE5 → LLM/TTS, pas d'`AC_AIBrain`. Cette doc décrit le code réel.
 
 ## Source layout (`Source/Nidalheim/`)
 
@@ -25,41 +29,73 @@ Source/Nidalheim/
 │   └── NidalheimAuthSubsystem.cpp   UGameInstanceSubsystem — orchestrator
 │
 ├── Character/
-│   ├── NidalheimCharacterBase       Base GAS (ASC + AttributeSet + abilities)
-│   ├── NidalheimPlayerCharacter     Capsule + character movement (input/caméra en BP)
-│   ├── NidalheimNPCCharacter        PNJ "cerveau" — double WebSocket text+audio
-│   ├── NidalheimInGameNPC           PNJ posé en niveau, InteractionSphere → ShowChat
-│   └── NidalheimAudioCaptureComponent
+│   ├── NidalheimCharacterBase       Base GAS (ASC + Basic/Combat AttributeSets + abilities)
+│   ├── NidalheimPlayerCharacter     Capsule + movement + SurvivalAttributeSet + composant survie
+│   ├── NidalheimEnemyCharacter      Ennemi GAS (cible IA, ability d'attaque, weapons manager)
+│   ├── NidalheimNPCCharacter        PNJ "cerveau" — double WebSocket text+audio (capture miniaudio)
+│   └── NidalheimInGameNPC           PNJ posé en niveau, InteractionSphere → ShowChat
 │
 ├── Player/
 │   └── NidalheimPlayerController    IMC mappings (AddMappingContext)
 │
-├── System/
-│   └── NidalheimGameMode
-│
 ├── AbilitySystem/                   GAS — convention Nidalheim*
 │   ├── NidalheimAbilitySystemComponent
-│   ├── Abilities/NidalheimGameplayAbility
-│   └── Attributes/NidalheimAttributeSet
+│   ├── Abilities/                   Dash, Death, Melee{Attack,Combo,Swing}, Shield,
+│   │                                ShootProjectile, ReactiveStaminaRegen, WeaponGameplayAbility,
+│   │                                EnemyMeleeAttack, GameplayAbility (base)
+│   ├── Attributes/                  Basic, Combat, Survival (3 attribute sets)
+│   └── Talents/                     NidalheimTalentDataAsset + NidalheimTalentTreeComponent
 │
-└── UI/
-    ├── NidalheimChatSubsystem       ULocalPlayerSubsystem — propriétaire NPC + ChatWidget
-    ├── NidalheimChatWidget          Slate (pas UMG)
-    ├── NidalheimAuthUISubsystem     Affichage user_code, état d'auth
-    └── NidalheimAuthWidget
+├── Weapons/                         WeaponBase → Sword/Bow/Staff, Projectile{Base,Arrow},
+│   │                                WeaponsManagerComponent, NidalheimWeaponTypes.h
+│
+├── Inventory/                       InventoryComponent, HotbarComponent, ItemPickup,
+│   │                                NidalheimItemTypes.h
+│
+├── Survival/                        NidalheimSurvivalComponent (faim/soif, debuffs, Consume/Rest)
+│
+├── AI/                              NidalheimAIController + BTService_CombatUpdate +
+│   │                                BTTask_{ActivateAttackAbility,ClearTarget,FindPatrolPoint}
+│
+├── Interaction/                     NidalheimDoorSubsystem
+│
+├── Core/                            NidalheimGameplayTags (tags natifs)
+│
+├── System/                          GameInstance, GameMode, MenuGameMode, QuestSubsystem,
+│   │                                SaveSubsystem + SaveGame, + commandlets éditeur
+│   │                                (AddAimSpinePitch, ResampleBlendSpace, RestoreStaffSockets,
+│   │                                SetMontageSlot)
+│
+├── UI/
+│   ├── HUD/                         PlayerHUD, HUDWidget, PlayerVitals, AbilitiesBar/Ability,
+│   │                                Crosshair, Status/StatusEffect
+│   ├── Inventory/                   Inventory{Widget,SlotWidget}, Hotbar{Widget,SlotWidget}
+│   ├── Talents/                     TalentTree/Talent/TalentDescription widgets
+│   ├── NidalheimChatSubsystem       ULocalPlayerSubsystem — propriétaire NPC + ChatWidget
+│   ├── NidalheimChatWidget          Slate
+│   ├── NidalheimAuthUISubsystem / NidalheimAuthWidget
+│   ├── NidalheimDeathScreenWidget / NidalheimMainMenuWidget / NidalheimCharacterPreview
+│
+└── ThirdParty/miniaudio/            Header vendored (capture push-to-talk basse latence)
 ```
 
-> Le dossier `TP_ThirdPerson/` (template UE5) coexiste mais n'est **pas** la logique de prod. À supprimer dès que possible.
+> Le dossier `TP_ThirdPerson/` (template UE5) a été retiré — la logique de prod vit dans les domaines ci-dessus.
 
-Détails sur l'organisation `Content/` et le naming dans [Conventions](/docs/unreal-engine/conventions).
+Détails par domaine : [GAS](/docs/unreal-engine/gas), [Armes](/docs/unreal-engine/weapons), [Inventaire](/docs/unreal-engine/inventory), [Survie](/docs/unreal-engine/survival), [Talents](/docs/unreal-engine/talents), [IA ennemie](/docs/unreal-engine/ai-enemy), [Quêtes](/docs/unreal-engine/quests), [HUD](/docs/unreal-engine/hud), [Persistance](/docs/unreal-engine/persistence), [Commandlets](/docs/unreal-engine/commandlets).
 
 ## Build.cs — modules
 
-**Public** : `Core`, `CoreUObject`, `Engine`, `InputCore`, `EnhancedInput`, `AIModule`, `StateTreeModule`, `GameplayStateTreeModule`, `GameplayTasks`, `GameplayTags`, `GameplayAbilities`, `UMG`, `Slate`, `Sockets`, `WebSockets`, `AudioMixer`, `AudioCapture`, `Niagara`, `NiagaraCore`, `ChaosNiagara`, `NetCore`.
+**Public** : `Core`, `CoreUObject`, `Engine`, `InputCore`, `EnhancedInput`, `AIModule`, `StateTreeModule`, `GameplayStateTreeModule`, `GameplayTasks`, `GameplayTags`, `GameplayAbilities`, `UMG`, `Slate`, `Sockets`, `WebSockets`, `AudioMixer`, `Niagara`, `NiagaraCore`, `ChaosNiagara`, `NetCore`, `NavigationSystem`, `AssetRegistry`, `AnimGraphRuntime`, `CinematicCamera`.
 
 **Privé** : `SSL`, `HTTP`, `SlateCore`, `Json`, `JsonUtilities`.
 
-`PublicIncludePaths` inclut explicitement les sous-dossiers (`Auth/`, `Character/`, `AbilitySystem/`, `Player/`, `UI/`, `System/`) pour permettre les `#include "X.h"` sans préfixe de chemin.
+**Éditeur seulement** (`if (Target.bBuildEditor)`) : `UnrealEd`, `AnimGraph`, `BlueprintGraph` — requis par les [commandlets de maintenance d'assets](/docs/unreal-engine/commandlets), jamais linkés en build game/client.
+
+> ⚠️ Le module `AudioCapture` a été **retiré** : la capture push-to-talk passe désormais par **miniaudio** (header vendored dans `ThirdParty/miniaudio/`, WASAPI uniquement), qui remplace `UAudioCaptureComponent` (latence 150–400 ms via le buffering AudioMixer + USynthComponent).
+
+`PublicIncludePaths` inclut les sous-dossiers pour permettre les `#include "X.h"` sans préfixe de chemin.
+
+> ⚠️ **Include paths morts** : `Nidalheim/Audio`, `Nidalheim/Quest` et `Nidalheim/Quest/Objectives` sont encore listés dans `Build.cs` mais ces dossiers **n'existent pas** (le quest subsystem vit dans `System/`). `Nidalheim/AbilitySystem/Attributes` y figure aussi en double. À nettoyer.
 
 ## Configuration runtime
 
@@ -85,13 +121,14 @@ Toute modification de protocole doit être appliquée des **deux côtés** :
 | Query params WebSocket | `services/api-game/src/server.js` | `BuildWsUrl` dans `NidalheimNPCCharacter.cpp` |
 | Endpoints device flow | `services/api-auth/src/routes/device.ts` | `FNidalheimAuthClient` |
 | Schema `npcs` | `services/db/src/schema/npcs.ts` + migration | `NpcId` UPROPERTY (juste un FString, pas de breaking) |
+| Format de quête (`quest_offer`) | `services/api-game` (`QuestGenerator`) | `UNidalheimQuestSubsystem` (réception JSON) |
 | `JWT_SECRET` rotation | Mettre à jour `infra/.env` sur les deux services | Force re-login (tous les access tokens existants invalidés) |
 
 ## Liens internes
 
 - [Conventions UE5](/docs/unreal-engine/conventions) — Lyra + naming Epic
 - [Authentification](/docs/unreal-engine/auth) — Device flow client
-- [PlayerCharacter](/docs/unreal-engine/characters/player) — input BP + GAS
-- [NPCCharacter](/docs/unreal-engine/characters/npc) — multi-instance + proximity
+- [PlayerCharacter](/docs/unreal-engine/characters/player) / [NPCCharacter](/docs/unreal-engine/characters/npc)
+- [Gameplay Ability System](/docs/unreal-engine/gas) — ASC, attributs, abilities
 - [Chat & UI](/docs/unreal-engine/chat) — ChatSubsystem + Widget
 - [Workflow Perforce](/docs/unreal-engine/perforce)

@@ -107,10 +107,12 @@ FOnUserTranscriptionSignature OnUserTranscriptionDelegate;
 
 Détails dans [Voice pipeline](/docs/backend/voice-pipeline) côté backend. Côté UE5 :
 
-1. **Capture** : `UNidalheimAudioCaptureComponent` ouvre un capture device au sample rate du système
+1. **Capture** : la capture push-to-talk passe par **miniaudio** (header vendored `ThirdParty/miniaudio/`, WASAPI), qui ouvre un device au sample rate système avec une latence bien moindre que l'ancien `UAudioCaptureComponent`
 2. **Streaming** : envoi binaire frames PCM au WebSocket `/audio` (le client envoie un `audio_config` au début pour signaler le sample rate)
 3. **Commit** : `CommitAudioBuffer()` envoie un message texte `COMMIT` qui finalise l'utterance côté Deepgram
 4. **Playback** : les frames PCM TTS reçues sont écrites dans un `USoundWaveProcedural` lu par un `UAudioComponent`
+
+> ⚠️ **Refactor récent** : `UNidalheimAudioCaptureComponent` (et le module `AudioCapture`) ont été **supprimés** — la capture est désormais gérée par **miniaudio** (latence 150–400 ms évitée vs AudioMixer + USynthComponent).
 
 ## Proximity chat (`ANidalheimInGameNPC`)
 
@@ -142,7 +144,7 @@ Le NPCCharacter sous-jacent reste connecté ; seule la visibilité de l'UI et l'
 
 ```
 BeginPlay
-  → AudioCaptureComponent setup (NewObject + RegisterComponent)
+  → Init capture audio miniaudio (device WASAPI)
   → ConnectTextWebSocket / ConnectAudioWebSocket
        └─ AuthSubsystem->EnsureFreshAccessToken
               └─ OpenTextSocketWithToken / OpenAudioSocketWithToken

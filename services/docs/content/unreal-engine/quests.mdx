@@ -1,0 +1,181 @@
+---
+title: Quêtes
+---
+
+# Quêtes (F04–F11)
+
+Les quêtes sont le **cœur EIP** de Nidalheim : elles sont **générées contextuellement par l'IA cloud** (`api-game`, classe `QuestGenerator`), pas par le client. Côté UE5, `UNidalheimQuestSubsystem` (`Source/Nidalheim/System/`) ne fait que **recevoir, afficher et suivre** une quête déjà construite par le backend, puis lui renvoyer la complétion.
+
+> ⚠️ **La génération de quête n'est PAS dans ce subsystem.** `UNidalheimQuestSubsystem` ne crée jamais de quête : il reçoit un payload `quest_offer` (déjà rédigé par le LLM côté `api-game`), spawn les ennemis correspondants et compte les kills. Tout le « contextuel » (titre, objectif, cible, récompense) vient du backend. Voir `/docs/backend/services/api-game`.
+
+> ⚠️ **Divergence avec la doc EIP.** Le document `Nidalheim_Context_Cowork.docx` décrit une chaîne `AC_AIBrain` / REST. L'implémentation réelle documentée ici passe par le **WebSocket texte du PNJ** (`ANidalheimNPCCharacter`) + un subsystem de suivi local. Aucun `AC_AIBrain` n'existe dans le code.
+
+## Le subsystem — `UNidalheimQuestSubsystem`
+
+C'est un `ULocalPlayerSubsystem` (état par joueur local). Il ne suit qu'**une seule quête active à la fois**, et **uniquement** les objectifs de type `Kill`.
+
+```cpp
+// Source/Nidalheim/System/NidalheimQuestSubsystem.h
+DECLARE_MULTICAST_DELEGATE_OneParam(FNidalheimQuestCompletedSignature, const FString&);
+
+UCLASS()
+class NIDALHEIM_API UNidalheimQuestSubsystem : public ULocalPlayerSubsystem
+{
+    GENERATED_BODY()
+public:
+    /** Objectif atteint — relayé au backend par ANidalheimNPCCharacter (canal texte). */
+    FNidalheimQuestCompletedSignature OnQuestCompleted;
+
+    void StartKillQuest(const FString& InTitle, const FString& InObjectiveText, int32 InKillTarget, const FString& InQuestId);
+    bool IsQuestActive() const { return bQuestActive; }
+};
+```
+
+### État interne de la quête active
+
+| Champ | Type | Rôle |
+|---|---|---|
+| `bQuestActive` | `bool` | Quête en cours ? Passe à `false` à la complétion ou si le spawn échoue. |
+| `QuestTitle` | `FString` | Titre affiché (reçu du backend). |
+| `ObjectiveText` | `FString` | Texte d'objectif (fallback sur le titre si vide). |
+| `ActiveQuestId` | `FString` | Identifiant backend (`questId`), renvoyé tel quel à la complétion. |
+| `KillTarget` | `int32` | Nombre d'ennemis à tuer (au moins 1, clampé). |
+| `KillCount` | `int32` | Compteur courant. |
+| `TrackedRaiders` | `TArray<TWeakObjectPtr<ANidalheimEnemyCharacter>>` | **Seuls** ces pilleurs font progresser le compteur. |
+
+> ⚠️ **Pas de struct de quête côté C++ client.** Le subsystem ne stocke pas un `FQuest`/`FObjective` : il aplatit le payload en quelques champs scalaires (titre, texte, cible, id). La structure riche (stages, objectifs, récompenses) n'existe que côté backend (`QuestData`, voir plus bas). L'affichage est un simple message à l'écran (`GEngine->AddOnScreenDebugMessage`), pas un widget de journal dédié.
+
+### API publique
+
+| Méthode | Effet |
+|---|---|
+| `StartKillQuest(title, objective, killTarget, questId)` | Démarre/**remplace** la quête active. Oublie les pilleurs précédents, fait spawn `killTarget` pilleurs, affiche l'objectif. **Annulée** (`bQuestActive=false`) si aucun marqueur `RaiderSpawn` dans le niveau. |
+| `IsQuestActive()` | `true` si une quête est suivie. |
+| `OnQuestCompleted` (délégué) | Diffusé avec le `questId` à l'atteinte de l'objectif. C'est le **seul point UI/relais** exposé. |
+
+### Suivi des kills
+
+Le spawn cherche un acteur taggué `RaiderSpawn` (posé par le designer dans la forêt), éparpille les pilleurs autour, et s'abonne à leur mort. Sans marqueur, rien ne spawn et la quête est annulée.
+
+```cpp
+// Source/Nidalheim/System/NidalheimQuestSubsystem.cpp
+void UNidalheimQuestSubsystem::HandleEnemyDied(ANidalheimEnemyCharacter* Enemy)
+{
+    if (!bQuestActive) return;
+    // Seuls les pilleurs de la quête courante comptent.
+    if (!TrackedRaiders.Contains(Enemy)) return;
+
+    ++KillCount;
+    if (KillCount >= KillTarget)
+    {
+        bQuestActive = false;
+        UE_LOG(LogTemp, Log, TEXT("[Quest] complete: %s (%s)"), *QuestTitle, *ActiveQuestId);
+        // Notifie le backend via le PNJ : sans ça, la quête y reste « en cours » pour toujours.
+        OnQuestCompleted.Broadcast(ActiveQuestId);
+    }
+    else { ShowQuestOnScreen(); }
+}
+```
+
+> ⚠️ Le délégué `OnQuestCompleted` est un **`DECLARE_MULTICAST_DELEGATE` non-dynamic** (callback C++ interne), pas un délégué dynamic exposé au Blueprint. Le journal/HUD se branche donc en C++ (aujourd'hui : seul `ANidalheimNPCCharacter` y est abonné).
+
+## Le lien avec le backend — où se fait vraiment la génération
+
+La quête contextuelle est produite par `api-game` (`QuestGenerator.generateStructuredQuest`, modèle LLM Groq, fallback déterministe si le LLM répond hors-schéma). Elle est livrée au client **via le WebSocket texte du PNJ**, en tant qu'**event JSON** `quest_offer` — pas via un appel REST côté UE5.
+
+```cpp
+// Source/Nidalheim/Character/NidalheimNPCCharacter.cpp
+if (Type == TEXT("quest_offer")) { HandleQuestOffer(Json); return true; }
+```
+
+`ANidalheimNPCCharacter` distingue un event serveur (JSON commençant par `{`) d'une réplique PNJ (texte brut). Sur `quest_offer`, il parse `payload`, prend **le premier stage / premier objectif**, et si `type == "Kill"` appelle `StartKillQuest` puis se branche sur `OnQuestCompleted`.
+
+> ⚠️ **Couverture client partielle.** Le schéma backend définit les types d'objectif `Kill | Collect | Reach | TalkTo | UseAbility | OpenEnded`, des stages multiples et des modes de complétion `all | any | ordered`. Le client **ne gère que `Kill`, stage 0, objectif 0**. Tout autre type est consommé puis **droppé avec un warning** (`quest_offer dropped: unsupported objective type`). Le fallback backend génère justement des quêtes `Collect` — donc non suivies par ce subsystem en l'état.
+
+### Forme du payload (côté backend, `questTypes.ts`)
+
+`QuestData` est la structure source de vérité (le client n'en lit qu'une fraction) :
+
+| Champ | Type backend | Lu par le client ? |
+|---|---|---|
+| `questId` | `string` | Oui → `ActiveQuestId` |
+| `title` | `string` | Oui → `QuestTitle` |
+| `summary` | `string` | Non |
+| `kind` | `structured \| narrative \| emergent` | Non |
+| `evaluationStrategy` | `client \| server-llm` | Non |
+| `issuer` | `npc \| board \| system` | Non |
+| `rewards` | `xp` + `items[]` | Non (suivi récompense côté backend) |
+| `stages[].objectives[].type` | `Kill \| Collect \| ...` | Oui (premier seulement) |
+| `stages[].objectives[].displayText` | `string` | Oui → `ObjectiveText` |
+| `stages[].objectives[].params.count` | `number` | Oui → `KillTarget` |
+
+### Le relais de complétion
+
+À l'objectif atteint, le client renvoie un message de contrôle JSON sur le canal texte. Sans lui, la quête reste « en cours » côté Postgres et le PNJ ne peut jamais en relancer une.
+
+```cpp
+// Source/Nidalheim/Character/NidalheimNPCCharacter.cpp
+const FString Control = FString::Printf(TEXT("{\"type\":\"quest_complete\",\"questId\":\"%s\"}"), *QuestId);
+TextWebSocket->Send(Control);
+```
+
+### Deuxième canal : routes REST (backend, non consommées par ce subsystem)
+
+`api-game` expose aussi des routes HTTP de quête (`questRoutes.ts`) — un tableau de quêtes (« board ») et le cycle de vie persistant : `POST /quests/generate`, `GET /quests/board`, `GET /quests/active`, `POST /quests/:id/accept`, `POST /quests/:id/progress`, `POST /quests/:id/complete`, `GET /quests/tags`.
+
+> ⚠️ Ces routes REST sont **un canal parallèle géré côté serveur** (`QuestStore`, persistance Postgres + récompenses). `UNidalheimQuestSubsystem` ne les appelle pas : le client passe exclusivement par `quest_offer` / `quest_complete` sur le WebSocket du PNJ. Documenté ici pour signaler que la persistance et la récompense (**F11**) vivent côté backend.
+
+## Flux F04 → F11
+
+```
+F04  Interaction PNJ
+       Le joueur entre dans la sphère d'un ANidalheimInGameNPC, ouvre le chat,
+       parle au PNJ (WebSocket /text vers api-game).
+
+F05  Génération IA contextuelle (BACKEND)
+       api-game → QuestGenerator.generateStructuredQuest(contexte)
+       LLM Groq rédige une QuestData ; fallback déterministe si hors-schéma.
+       → cible EIP : ≥ 80% de quêtes pertinentes sur 10 générations.
+
+       api-game pousse  {"type":"quest_offer","payload":<QuestData>}
+       sur le WebSocket texte du PNJ.
+
+F07  Réception client
+       ANidalheimNPCCharacter::TryHandleServerEvent → HandleQuestOffer
+       parse payload, stage[0], objective[0]. Si type == "Kill" :
+       UNidalheimQuestSubsystem::StartKillQuest(title, objective, count, questId)
+
+F08  Quête au "journal" (affichage écran)
+       SpawnRaiders(count) au marqueur 'RaiderSpawn' (sinon quête annulée).
+       ShowQuestOnScreen() → "QUETE : <objectif> (0/N)".
+
+F09  Progression
+       Chaque pilleur traqué qui meurt → HandleEnemyDied → ++KillCount
+       HUD mis à jour en place (clé fixe kQuestHudKey).
+
+F10  Validation
+       KillCount >= KillTarget → bQuestActive = false
+       OnQuestCompleted.Broadcast(questId)
+
+F11  Récompense (BACKEND)
+       ANidalheimNPCCharacter::SendQuestComplete renvoie
+       {"type":"quest_complete","questId":...} sur le WS texte.
+       api-game flippe la quête en 'completed' et attribue les récompenses
+       (QuestStore.completeQuest, route REST /quests/:id/complete renvoie rewards).
+       → cible EIP : 100% des validations donnent leur récompense.
+```
+
+## Critères EIP
+
+| Feature | Cible | Où c'est tenu |
+|---|---|---|
+| **F05** — quêtes IA contextuelles | ≥ 80% pertinentes sur 10 générations | `QuestGenerator` (backend), pas le client |
+| **F11** — récompense de quête | 100% des validations récompensées | `QuestStore` + route `/quests/:id/complete` (backend) ; le client ne fait que déclencher via `quest_complete` |
+
+> ⚠️ La pertinence (**F05**) et la récompense (**F11**) sont **mesurées et appliquées côté backend**. Le client UE5 n'évalue ni la pertinence ni la récompense : il déclenche la génération (dialogue PNJ) et signale la complétion. Toute régression sur ces deux chiffres se diagnostique dans `api-game`.
+
+## Voir aussi
+
+- [PNJ — ANidalheimNPCCharacter](/docs/unreal-engine/characters/npc) — le pont WebSocket qui reçoit `quest_offer` et renvoie `quest_complete`.
+- [api-game](/docs/backend/services/api-game) — `QuestGenerator`, `QuestStore`, routes REST de quête, génération LLM.
+- [Voice pipeline](/docs/backend/voice-pipeline) — la chaîne STT/LLM/TTS du dialogue PNJ qui déclenche la génération.
