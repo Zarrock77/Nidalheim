@@ -1,0 +1,261 @@
+---
+title: Gameplay Abilities
+---
+
+# Gameplay Abilities
+
+Les Gameplay Abilities du jeu vivent dans `Source/Nidalheim/AbilitySystem/Abilities/`. Toutes dérivent — directement ou non — de `UNidalheimGameplayAbility`, et les abilities liées à une arme dérivent de la sous-classe intermédiaire `UNidalheimWeaponGameplayAbility`. Cette page documente fidèlement le code C++ réel : rôle, classe parente, propriétés `EditDefaultsOnly`, ce que fait `ActivateAbility`, et les `GameplayTags` posés / consommés.
+
+Ces abilities couvrent le pilier **Combat (F12–F18)** de la beta Greenlight : mêlée, capacités spécifiques à l'arme/au perso, esquive et IA ennemie. Le critère de succès associé est **0 échec sur 20 activations** pour les capacités GAS (F13–F14).
+
+## Récapitulatif
+
+| Ability | Classe parente | Rôle | Tags clés |
+|---------|----------------|------|-----------|
+| `UNidalheimGameplayAbility` | `UGameplayAbility` | Base de toutes les abilities | Pose `GameplayAbility.Active`, bloquée par `State.Dead` |
+| `UNidalheimWeaponGameplayAbility` | `UNidalheimGameplayAbility` | Base abstraite des abilities d'arme | Gating via `RequiredWeaponTag` |
+| `UNidalheimDashAbility` | `UNidalheimGameplayAbility` | Esquive / dash directionnel (F15) | Coût + cooldown via GE `Dash` |
+| `UNidalheimMeleeAttackAbility` | `UNidalheimWeaponGameplayAbility` | Base mêlée (montage + sphère de dégâts) | Consomme `Data.Damage` |
+| `UNidalheimMeleeComboAbility` | `UNidalheimMeleeAttackAbility` | Combo épée (Primary) | Requiert `Weapon.Melee.Sword` |
+| `UNidalheimMeleeSwingAbility` | `UNidalheimMeleeAttackAbility` | Swing épée (Secondary) | Requiert `Weapon.Melee.Sword` |
+| `UNidalheimShieldAbility` | `UNidalheimWeaponGameplayAbility` | Bouclier défensif (bâton) | Requiert `Weapon.Magic.Staff` |
+| `UNidalheimShootProjectileAbility` | `UNidalheimWeaponGameplayAbility` | Tir à l'arc maintenu (F17) | Requiert `Weapon.Ranged.Bow`, consomme `Data.Damage` |
+| `UNidalheimReactiveStaminaRegenAbility` | `UNidalheimGameplayAbility` | Régen stamina passive (serveur) | Auto-activée, hors barre |
+| `UNidalheimDeathAbility` | `UNidalheimGameplayAbility` | Mort + ragdoll (serveur) | Asset tag `GameplayAbility.Death`, pose `State.Dead` |
+| `UNidalheimEnemyMeleeAttackAbility` | `UNidalheimGameplayAbility` | Attaque mêlée ennemie (F18) | Consomme `Data.Damage`, pas de friendly-fire |
+
+## 1. Base & arme
+
+### `UNidalheimGameplayAbility`
+
+Base de toutes les abilities du projet. Le constructeur pose les tags structurels communs et expose des propriétés UI / input.
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Abilities/NidalheimGameplayAbility.cpp
+UNidalheimGameplayAbility::UNidalheimGameplayAbility()
+{
+    ActivationOwnedTags.AddTag(FGameplayTag::RequestGameplayTag(FName("GameplayAbility.Active")));
+    ActivationBlockedTags.AddTag(FGameplayTag::RequestGameplayTag("State.Dead"));
+}
+```
+
+- Pendant qu'elle est active, l'ability donne le tag `GameplayAbility.Active` à son porteur (`ActivationOwnedTags`).
+- Toute ability est **bloquée tant que le porteur a `State.Dead`** (`ActivationBlockedTags`) — un mort ne peut plus rien activer.
+
+Propriétés `EditAnywhere` clés (header) :
+
+- `ShouldShowInAbilitiesBar` (`bool`) — visibilité dans la barre GAS.
+- `AbilityIcon` (`TObjectPtr<UTexture2D>`) — icône affichée dans la barre.
+- `AutoActivateWhenGranted` (`bool`) — activation immédiate à l'octroi (utilisé par les passifs).
+- `AbilityInputID` (`EAbilityInputID`) — slot d'input : `PrimaryAbility`, `SecondaryAbility`, `DefensiveAbility`, `MovementAbility`.
+
+Helpers : `SetAbilityLevel(int32)` (modifie le `Level` du spec courant) et le privé `HasPC()`.
+
+### `UNidalheimWeaponGameplayAbility`
+
+Base **abstraite** des abilities d'arme. Le constructeur force `ShouldShowInAbilitiesBar = true` et `InstancingPolicy = InstancedPerActor`. Elle ajoute un gating par arme via la propriété :
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Abilities/NidalheimWeaponGameplayAbility.h
+/** Tag d'identité de l'arme requise (ex. Weapon.Melee.Sword). Vide = aucune contrainte. */
+UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon")
+FGameplayTag RequiredWeaponTag;
+```
+
+`CanActivateAbility` est surchargé : après le `Super`, si `RequiredWeaponTag` est valide, l'arme équipée (via `UNidalheimWeaponsManagerComponent`) doit porter un tag d'identité qui matche.
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Abilities/NidalheimWeaponGameplayAbility.cpp
+if (!RequiredWeaponTag.IsValid())
+{
+    return true;
+}
+const UNidalheimWeaponsManagerComponent* WMC = GetWeaponsManager(ActorInfo);
+const ANidalheimWeaponBase* Equipped = WMC ? WMC->GetEquippedWeapon() : nullptr;
+return Equipped && Equipped->GetWeaponIdentityTag().MatchesTag(RequiredWeaponTag);
+```
+
+C'est ce gating qui permet de monter plusieurs abilities sur le même slot d'input : l'arme équipée décide laquelle s'active (ex. swing épée vs tir à l'arc, tous deux sur `SecondaryAbility`).
+
+## 2. Mobilité — Dash (F15 esquive)
+
+### `UNidalheimDashAbility`
+
+Hérite directement de `UNidalheimGameplayAbility`. Slot `MovementAbility`, `LocalPredicted`. Le constructeur charge l'icône, le **Cost GE** (`GE_Dash_Cost`, stamina) et le **Cooldown GE** (`GE_Dash_Cooldown`).
+
+Propriétés `EditDefaultsOnly` : `DashStrength = 1500.f`, `DashVerticalStrength = 250.f`.
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Abilities/NidalheimDashAbility.cpp
+if (!CommitAbility(Handle, ActorInfo, ActivationInfo))   // applique coût + cooldown
+{
+    EndAbility(Handle, ActorInfo, ActivationInfo, true, true);
+    return;
+}
+FVector Direction = Character->GetLastMovementInputVector();
+if (Direction.IsNearlyZero()) { Direction = Character->GetActorForwardVector(); }
+Direction.Z = 0.f;
+Direction = Direction.GetSafeNormal();
+const FVector LaunchVelocity = Direction * DashStrength + FVector(0.f, 0.f, DashVerticalStrength);
+Character->LaunchCharacter(LaunchVelocity, /*bXYOverride*/ true, /*bZOverride*/ true);
+```
+
+`ActivateAbility` commit (échec → `EndAbility` annulé), calcule la direction (input courant sinon avant du perso), propulse via `LaunchCharacter`, puis termine. Coût/cooldown sont portés par les GE — l'ability elle-même ne pose pas de tag de cooldown explicite en C++.
+
+## 3. Mêlée joueur (F12–F14)
+
+### `UNidalheimMeleeAttackAbility` (base abstraite)
+
+Classe **abstraite** dérivant de `UNidalheimWeaponGameplayAbility`. Joue un montage d'attaque, applique des dégâts en sphère devant le perso, puis se termine quand le montage finit. `LocalPredicted`. Le constructeur charge `DamageEffect = GE_Damage_Instant`.
+
+Propriétés `EditDefaultsOnly` : `AttackMontage`, `AttackRange = 175.f`, `AttackRadius = 130.f`, `DamageEffect` (`TSubclassOf<UGameplayEffect>`), `Damage = 50.f` (deux coups d'épée tuent un ennemi à 100 PV).
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Abilities/NidalheimMeleeAttackAbility.cpp
+if (!CommitAbility(Handle, ActorInfo, ActivationInfo)) { EndAbility(...true, true); return; }
+
+// Dégâts (autorité) : sphère devant l'avatar.
+if (ActorInfo->AvatarActor.Get() && ActorInfo->AvatarActor->HasAuthority())
+{
+    ApplyMeleeDamageInFront();
+}
+// ... puis PlayMontageAndWait ; OnMontageFinished -> EndAbility
+```
+
+`ApplyMeleeDamageInFront` fait un `OverlapMultiByChannel(ECC_Pawn)` dans une sphère centrée à `ActorLocation + Forward * AttackRange`, dédoublonne les ASC touchés, et applique `GE_Damage_Instant` à chacun (sauf soi). La magnitude des dégâts est passée par SetByCaller :
+
+```cpp
+Spec.Data->SetSetByCallerMagnitude(NidalheimGameplayTags::Data_Damage, Damage);
+SourceASC->ApplyGameplayEffectSpecToTarget(*Spec.Data.Get(), TargetASC);
+```
+
+Détail notable : pendant le coup, le root motion du montage est **ignoré** (`SetAvatarRootMotionIgnored(true)`) pour laisser l'input piloter le déplacement, puis restauré au mode précédent dans `OnMontageFinished` **et** dans `EndAbility` (filet de sécurité idempotent sur tous les chemins de fin).
+
+> ⚠️ Les dégâts ne sont appliqués que sur l'autorité (`HasAuthority()`). En `LocalPredicted`, le client joue le montage mais c'est le serveur qui inflige les dégâts via le GE — ne jamais appliquer de dégâts côté client.
+
+### `UNidalheimMeleeComboAbility`
+
+Dérive de `UNidalheimMeleeAttackAbility`. Le constructeur fixe seulement le slot et le gating :
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Abilities/NidalheimMeleeComboAbility.cpp
+AbilityInputID = EAbilityInputID::PrimaryAbility;       // clic gauche
+RequiredWeaponTag = NidalheimGameplayTags::Weapon_Melee_Sword;
+// + icône axe-combo + montage AM_Sword_Attack_Combo
+```
+
+### `UNidalheimMeleeSwingAbility`
+
+Identique en structure, mais sur le slot `SecondaryAbility` (clic droit) et avec le montage `AM_Sword_Attack_Swing`, icône `axe-swing`. Requiert lui aussi `Weapon.Melee.Sword`.
+
+## 4. Défense — Shield
+
+### `UNidalheimShieldAbility`
+
+Dérive de `UNidalheimWeaponGameplayAbility`. Slot `DefensiveAbility` (R), requiert un **bâton** équipé (`Weapon.Magic.Staff`). Le constructeur charge l'icône `aura` et `ShieldEffect = GE_GiveShield`.
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Abilities/NidalheimShieldAbility.cpp
+if (!CommitAbility(Handle, ActorInfo, ActivationInfo)) { EndAbility(...true, true); return; }
+if (ShieldEffect)
+{
+    ApplyGameplayEffectToOwner(Handle, ActorInfo, ActivationInfo,
+        ShieldEffect->GetDefaultObject<UGameplayEffect>(), GetAbilityLevel());
+}
+EndAbility(Handle, ActorInfo, ActivationInfo, true, false);
+```
+
+`ActivateAbility` applique simplement le GE de bouclier au porteur puis termine immédiatement.
+
+## 5. Distance — Tir à l'arc (F17)
+
+### `UNidalheimShootProjectileAbility`
+
+Dérive de `UNidalheimWeaponGameplayAbility`. C'est l'ability la plus riche : tir à l'arc sur **clic droit maintenu** (slot `SecondaryAbility`, requiert `Weapon.Ranged.Bow`, `InstancedPerActor`). Le constructeur charge les 3 séquences d'anim (bandage / maintien / décoche), l'icône, `ProjectileClass = ANidalheimProjectileArrow`, et `DamageEffect = GE_Damage_Instant`.
+
+Propriétés `EditDefaultsOnly` : `DrawSequence`, `AimLoopSequence`, `RecoilSequence` (`TObjectPtr<UAnimSequenceBase>`), `ProjectileClass` (`TSubclassOf<ANidalheimProjectileBase>`), `ProjectileSpeed = 3500.f`, `Range = 5000.f`, `DamageEffect`, `Damage = 25.f`.
+
+Cycle de vie :
+
+1. **Activation** : commit, `SetAiming(true)` sur le `ANidalheimPlayerCharacter`, encoche la flèche sur l'arc, joue le montage de bandage (séquence en montage dynamique sur le slot `UpperBody` — le bas du corps garde la locomotion, on peut marcher en bandant). Deux timers : `OnStringGrabbed` (mi-bandage) et `OnDrawFinished` (fin du bandage → boucle de maintien). Un `WaitInputRelease` arme le relâcher.
+2. **Relâcher** (`OnInputReleased`) : si l'arc était bandé (`bDrawComplete`) et le porteur vivant, joue le recul et — **sur autorité uniquement** — spawn le projectile.
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Abilities/NidalheimShootProjectileAbility.cpp
+const bool bDead = ASC && ASC->HasMatchingGameplayTag(NidalheimGameplayTags::State_Dead);
+if (bDrawComplete && Character && !bDead)
+{
+    // ... désencoche, claque la corde
+    if (Character->HasAuthority()) { SpawnProjectile(Character); }
+    PlayAimAnim(RecoilSequence, 1);
+    // ... fin différée le temps du recul
+}
+```
+
+`SpawnProjectile` fait un line trace **depuis la caméra** pour le point visé, spawn différé (`SpawnActorDeferred`) du projectile en lui posant `Speed`, `TargetLocation` et un `EffectSpecHandle` pré-construit (toujours via SetByCaller `Data.Damage`). Les dégâts voyagent donc dans le projectile, pas appliqués directement par l'ability.
+
+> ⚠️ Le spawn du projectile est gardé par `HasAuthority()`. Le `State.Dead` ne bloque que les **nouvelles** activations : le relâcher d'une ability déjà active sur un cadavre est explicitement filtré ici (`bDead`) pour qu'un mort ne décoche pas. `EndAbility` nettoie tous les chemins (caméra, flèche encochée, montage de visée, timers) sur l'arc mémorisé à l'activation (`ActiveBow`), pas sur l'arme du moment.
+
+## 6. Régén stamina réactive (passif)
+
+### `UNidalheimReactiveStaminaRegenAbility`
+
+Dérive de `UNidalheimGameplayAbility`. Passif **serveur uniquement** :
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Abilities/NidalheimReactiveStaminaRegenAbility.cpp
+AutoActivateWhenGranted = true;
+ShouldShowInAbilitiesBar = false; // passive, pas dans la barre
+InstancingPolicy = EGameplayAbilityInstancingPolicy::InstancedPerActor;
+NetExecutionPolicy = EGameplayAbilityNetExecutionPolicy::ServerOnly;
+// StaminaRegenEffect = GE_Status_StaminaRegen
+```
+
+`ActivateAbility` commit, applique l'effet de régén au porteur, puis termine. L'effet est **infini** : il persiste après la fin de l'ability (la stamina régénère en continu).
+
+## 7. Mort
+
+### `UNidalheimDeathAbility`
+
+Dérive de `UNidalheimGameplayAbility`. **Serveur uniquement**, déclenchée par tag (et non par input). Le constructeur lui donne l'**asset tag** `GameplayAbility.Death` pour être trouvée par `TryActivateAbilitiesByTag` (appelé par l'AttributeSet quand `Health <= 0`), et charge `DeathEffect = GE_Death`.
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Abilities/NidalheimDeathAbility.cpp
+FGameplayTagContainer Tags;
+Tags.AddTag(NidalheimGameplayTags::GameplayAbility_Death);
+SetAssetTags(Tags);
+// ...
+// Applique State.Dead -> ANidalheimCharacterBase::OnDeadTagChanged -> HandleDeath (ragdoll).
+ApplyGameplayEffectToOwner(Handle, ActorInfo, ActivationInfo,
+    DeathEffect->GetDefaultObject<UGameplayEffect>(), GetAbilityLevel());
+```
+
+L'application de `GE_Death` pose le tag `State.Dead`, ce qui déclenche `HandleDeath`/ragdoll dans `ANidalheimCharacterBase` — et bloque par ricochet toute future activation (cf. base ci-dessus).
+
+## 8. IA ennemie (F18)
+
+### `UNidalheimEnemyMeleeAttackAbility`
+
+Dérive de `UNidalheimGameplayAbility` (pas de `Weapon*` : l'ennemi n'a pas de loadout joueur). **Serveur uniquement**, `InstancedPerActor`. Activée par le Behavior Tree (`BTTask_ActivateAttackAbility`). Le constructeur charge `DamageEffect = GE_Damage_Instant` et le montage `AM_Sword_Attack_Swing`.
+
+Propriétés `EditDefaultsOnly` : `AttackRange = 150.f`, `AttackRadius = 120.f`, `DamageEffect`, `Damage = 15.f`, `AttackMontage`.
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Abilities/NidalheimEnemyMeleeAttackAbility.cpp
+if (Self && AttackMontage) { Self->PlayAnimMontage(AttackMontage); }
+// OverlapMultiByChannel(ECC_Pawn) dans une sphère devant l'ennemi
+for (const FOverlapResult& Overlap : Overlaps)
+{
+    // Pas de friendly-fire entre ennemis.
+    if (Cast<ANidalheimEnemyCharacter>(Overlap.GetActor())) { continue; }
+    // ... applique GE_Damage_Instant avec SetByCaller Data.Damage
+}
+```
+
+`ActivateAbility` joue le montage, puis applique les dégâts en sphère devant l'ennemi — en **excluant les autres ennemis** (`ANidalheimEnemyCharacter`) pour éviter le friendly-fire, ainsi que soi-même. Termine immédiatement après.
+
+## Voir aussi
+
+- [GAS — vue d'ensemble](/docs/unreal-engine/gas)
+- [Attributs GAS](/docs/unreal-engine/gas/attributes)
+- [Armes](/docs/unreal-engine/weapons)

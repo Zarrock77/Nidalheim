@@ -1,0 +1,210 @@
+---
+title: HUD & widgets
+---
+
+# HUD & widgets de jeu
+
+Tous les widgets du HUD de Nidalheim sont **construits en C++**, pas dessinés dans le designer UMG. Chaque classe dérive de `UUserWidget` et bâtit son arbre Slate à la main dans `RebuildWidget()` (et, quand il faut une boucle de rafraîchissement, dans `NativeConstruct()` / `NativeDestruct()`). Ce sont des réécritures manuelles des Blueprints décompilés (`W_PlayerHUD`, `W_AbilitiesBar`, etc.), d'où les commentaires `// Géométrie du BP` et les valeurs design-time conservées à l'identique.
+
+> ⚠️ Dans tous ces widgets, **l'ordre d'ajout des enfants au canvas/overlay définit le Z-order**. Les commentaires « ne pas réordonner » sont normatifs : par exemple, le fond de la barre d'abilities est ajouté *après* la rangée de slots pour être dessiné par-dessus.
+
+Le pattern de construction est partout le même : une garde `bBuilt` empêche de reconstruire l'arbre si `RebuildWidget()` est rappelé.
+
+```cpp
+// Source/Nidalheim/UI/HUD/NidalheimAbilitiesBarWidget.cpp
+TSharedRef<SWidget> UNidalheimAbilitiesBarWidget::RebuildWidget()
+{
+    if (!bBuilt && WidgetTree)
+    {
+        bBuilt = true;
+        BuildRoot();
+        // L'ordre d'ajout à l'overlay définit le Z-order — ne pas réordonner.
+        BuildContainer();
+        BuildBackground();
+    }
+    return Super::RebuildWidget();
+}
+```
+
+## Hiérarchie du HUD
+
+Il existe **deux racines HUD distinctes**, composées chacune sur leur propre canvas :
+
+```
+UNidalheimPlayerHUDWidget          (HUD GAS — créé par ANidalheimPlayerController)
+  ScaleBox > SizeBox 1920x1080 > CanvasPanel
+    ├─ UNidalheimAbilitiesBarWidget   (bas-centre)
+    │    └─ UNidalheimAbilityWidget × N  +  UNidalheimEmptyAbilityWidget × (complément)
+    ├─ UNidalheimCrosshairWidget      (centre — visible si arme à distance, hors visée)
+    ├─ AimDot (UImage)                (centre — visible en mode visée)
+    └─ UNidalheimPlayerVitalsWidget   (bas-gauche : vie / stamina / faim / soif + avatar)
+
+UNidalheimHUDWidget                (HUD inventaire — porté de WBP_HUD)
+  CanvasPanel
+    ├─ UNidalheimInventoryWidget      (bas-droite, masqué par défaut, touche I)
+    └─ UNidalheimHotbarWidget         (bas-centre)
+```
+
+`UNidalheimStatusWidget` et `UNidalheimStatusEffectWidget` existent mais ne sont rattachés à aucune des deux racines dans le code C++ lu (voir leur section).
+
+> ⚠️ Le `PlayerHUD` est dessiné à une **résolution de référence fixe de 1920×1080**, remise à l'échelle de l'écran par un `ScaleBox` racine englobant un `SizeBox`. Toutes les positions (`SetOffsets`) sont en pixels de référence, pas en pixels écran.
+
+## NidalheimPlayerHUDWidget — conteneur racine GAS
+
+Conteneur principal du HUD de jeu, créé et piloté par `ANidalheimPlayerController`. Il ne contient aucune donnée propre : il compose les sous-widgets sur le canvas à l'échelle et gère la visibilité du crosshair et du point de visée.
+
+- **Affiche** : barre d'abilities, crosshair, point de visée (`AimDot`, petit `UImage` blanc translucide construit en C++), vitals.
+- **Données** : aucune liaison directe. Le controller appelle `SetAimMode(bool)` et `SetCrosshairAllowed(bool)` ; `RefreshCrosshairState()` en déduit les visibilités.
+
+```cpp
+// Source/Nidalheim/UI/HUD/NidalheimPlayerHUDWidget.cpp
+void UNidalheimPlayerHUDWidget::RefreshCrosshairState()
+{
+    // Croix : seulement arme à distance équipée ET hors visée ; point : seulement en visée.
+    if (Crosshair)
+    {
+        Crosshair->SetVisibility((bCrosshairAllowed && !bAimMode)
+            ? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed);
+    }
+    if (AimDot)
+    {
+        AimDot->SetVisibility(bAimMode ? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed);
+    }
+}
+```
+
+## NidalheimHUDWidget — conteneur inventaire / hotbar
+
+Seconde racine, portée de `WBP_HUD`. Compose le panneau d'inventaire (`UNidalheimInventoryWidget`, ancré bas-droite, masqué par défaut) et la hotbar (`UNidalheimHotbarWidget`, bas-centre).
+
+- **Affiche** : inventaire + hotbar.
+- **Données** : délègue aux widgets enfants. `ToggleInventory()` (touche I via `ANidalheimPlayerController::ToggleInventory`) relaie à `Inventory->ToggleVisibility()` ; l'animation de slide est gérée par le widget inventaire lui-même.
+- **Construction** : le canvas racine est laissé en `ESlateVisibility::Visible` (et non `SelfHitTestInvisible`) afin de laisser passer les clics vers l'inventaire.
+
+## NidalheimPlayerVitalsWidget — vie / stamina / faim / soif
+
+Avatar du joueur entouré de quatre `UProgressBar`, **alimentées par poll** de l'ASC du pawn possédé.
+
+- **Affiche** : barre de vie, barre de stamina (toutes deux texturées), barres de faim et de soif (survie F19), avatar.
+- **Données** : poll par timer toutes les `0.1 s` (`UpdateBars`). Récupère l'ASC via `UAbilitySystemBlueprintLibrary::GetAbilitySystemComponent(GetOwningPlayerPawn())`, puis lit les attributs avec `GetNumericAttribute`. Vie/stamina viennent de `UNidalheimBasicAttributeSet` ; faim/soif de `UNidalheimSurvivalAttributeSet`. **Pas de delegate** : si l'ASC est absent, `UpdateBars` sort sans toucher aux barres (les pourcentages design-time restent affichés).
+
+```cpp
+// Source/Nidalheim/UI/HUD/NidalheimPlayerVitalsWidget.cpp
+const float Health = ASC->GetNumericAttribute(UNidalheimBasicAttributeSet::GetHealthAttribute());
+const float MaxHealth = ASC->GetNumericAttribute(UNidalheimBasicAttributeSet::GetMaxHealthAttribute());
+// ...
+if (HealthBar) HealthBar->SetPercent(MaxHealth > 0.f ? Health / MaxHealth : 0.f);
+
+// Jauges de survie : le set n'existe que sur le pawn joueur — garde anti-warnings GAS.
+if (HungerBar && ASC->HasAttributeSetForAttribute(UNidalheimSurvivalAttributeSet::GetHungerAttribute()))
+{
+    const float Hunger = ASC->GetNumericAttribute(UNidalheimSurvivalAttributeSet::GetHungerAttribute());
+    const float MaxHunger = ASC->GetNumericAttribute(UNidalheimSurvivalAttributeSet::GetMaxHungerAttribute());
+    HungerBar->SetPercent(MaxHunger > 0.f ? Hunger / MaxHunger : 0.f);
+}
+```
+
+> ⚠️ **Pattern « barre en aplat coloré » côté survie.** Vie et stamina utilisent des textures d'art (`HealthFill`, `StaminaFill`…). Faim et soif, elles, n'ont **aucun asset** : leur `FProgressBarStyle` rend une couleur pleine via la seule `TintColor` de la brosse. C'est volontaire — « pas besoin d'asset art, le rendu est garanti pour la démo Greenlight ».
+
+```cpp
+// Source/Nidalheim/UI/HUD/NidalheimPlayerVitalsWidget.cpp
+const FLinearColor HungerFillColor(0.85f, 0.52f, 0.12f, 1.0f); // ambre
+const FLinearColor ThirstFillColor(0.16f, 0.55f, 0.88f, 1.0f); // bleu
+
+FProgressBarStyle MakeSolidBarStyle(const FLinearColor& FillColor)
+{
+    FProgressBarStyle Style;
+    Style.BackgroundImage.TintColor = FSlateColor(SurvivalBarBackgroundColor);
+    Style.FillImage.TintColor = FSlateColor(FillColor); // couleur pleine, pas d'asset
+    return Style;
+}
+```
+
+## NidalheimAbilitiesBarWidget — barre de capacités
+
+Rangée horizontale de slots, peuplée depuis l'ASC du joueur et reconstruite quand l'ensemble d'abilities change.
+
+- **Affiche** : un `UNidalheimAbilityWidget` par ability dont `ShouldShowInAbilitiesBar` est vrai, complété par des `UNidalheimEmptyAbilityWidget` jusqu'à `MinimumSlots` (par défaut 4). Fond sombre semi-transparent ajouté **après** les slots.
+- **Données** : poll par timer toutes les `0.2 s` (`PollForChanges`). `CollectShownHandles()` itère `ASC->GetActivatableAbilities()` et collecte les handles à montrer ; si l'ensemble diffère du dernier connu (`LastShownHandles`), `FillAbilitiesBar()` reconstruit la rangée (utile au grant d'ability / changement d'arme).
+
+```cpp
+// Source/Nidalheim/UI/HUD/NidalheimAbilitiesBarWidget.cpp
+for (const FGameplayAbilitySpec& Spec : ASC->GetActivatableAbilities())
+{
+    if (const UNidalheimGameplayAbility* Ability = Cast<UNidalheimGameplayAbility>(Spec.Ability))
+    {
+        if (Ability->ShouldShowInAbilitiesBar)
+        {
+            Shown.AddUnique(Spec.Handle);
+        }
+    }
+}
+```
+
+### NidalheimAbilityWidget — slot d'ability
+
+Slot de `100×100` (`SizeBox` racine) superposant, dans un `Overlay` : l'icône, la barre de cooldown, le compteur de cooldown et le cadre actif.
+
+- **Affiche** : icône de l'ability (`Ability->AbilityIcon`, sinon une icône par défaut), barre de cooldown remplie bas→haut, compteur de secondes restantes (arrondi supérieur), cadre lumineux quand l'ability est active.
+- **Données** : lié via `SetupForAbility(ASC, Handle)` ; l'ASC est gardé en `TWeakObjectPtr` (le pawn peut être détruit au respawn). Poll par timer toutes les `0.05 s` (`RefreshState`). Le cooldown vient de `Ability->GetCooldownTimeRemainingAndDuration(...)` ; l'état actif de `Spec->IsActive()`.
+
+```cpp
+// Source/Nidalheim/UI/HUD/NidalheimAbilityWidget.cpp
+Ability->GetCooldownTimeRemainingAndDuration(SpecHandle, ActorInfo, TimeRemaining, CooldownDuration);
+const bool bOnCooldown = TimeRemaining > 0.f && CooldownDuration > 0.f;
+if (CooldownProgress)
+{
+    CooldownProgress->SetPercent(bOnCooldown ? FMath::Clamp(TimeRemaining / CooldownDuration, 0.f, 1.f) : 0.f);
+}
+if (TimerText && bOnCooldown)
+{
+    TimerText->SetText(FText::FromString(FString::FromInt(FMath::CeilToInt(TimeRemaining))));
+}
+```
+
+### NidalheimEmptyAbilityWidget — slot vide
+
+Slot purement visuel de `100×100` : un `SizeBox` contenant un `UImage` avec la texture de cadre (`frame-bg`), même fond que les slots pleins. Aucune logique, aucune donnée — sert uniquement à combler la rangée jusqu'à `MinimumSlots`.
+
+## NidalheimCrosshairWidget — réticule en croix
+
+Quatre branches (haut / gauche / bas / droite), chacune un `UImage` texturé, superposées dans un `Overlay` au sein d'une boîte de `30×30` (les branches sont dessinées en `50×50` et débordent volontairement).
+
+- **Affiche** : la croix de visée.
+- **Données** : aucune. Sa visibilité est entièrement pilotée par le `PlayerHUD` (visible seulement avec une arme à distance équipée et hors mode visée).
+
+## NidalheimStatusWidget + NidalheimStatusEffectWidget — effets / debuffs
+
+- **`UNidalheimStatusWidget`** : simple `UHorizontalBox` racine, **vide à la construction**, destiné à accueillir des pastilles d'effet. Aucune logique (fidèle au BP décompilé).
+- **`UNidalheimStatusEffectWidget`** : pastille de `25×25` superposant, dans un `Overlay` : une jauge d'accumulation (rouge sombre, remplie bas→haut), l'icône de l'effet (brosse posée par l'appelant), et une jauge de temps restant qui déborde de 3 px.
+
+> ⚠️ Ces deux widgets **n'ont encore aucune logique de données** : les pourcentages affichés sont les valeurs design-time du Blueprint (`DesignFillMeterPercent`, `DesignTimeLeftPercent`), et le conteneur n'est peuplé par aucun code C++ lu. Le câblage aux effets/debuffs GAS reste à faire.
+
+## Autres widgets UI (hors HUD de jeu)
+
+- **`UNidalheimDeathScreenWidget`** : écran de mort plein écran (style « Wasted »). Floute et assombrit la scène figée via un `SBackgroundBlur` et affiche « VOUS ÊTES MORT » (police runtime construite depuis un `UFontFace` Norse). Anime un fondu d'entrée puis de sortie dans `NativeTick` (machine à états `FadeIn` / `Hold` / `FadeOut`) ; `Dismiss()` lance le fondu de sortie.
+- **`UNidalheimMainMenuWidget`** : menu principal C++/Slate. Titre + bouton Jouer (charge le niveau `PlayLevelName`, défaut `MainLevel`) + bouton Quitter, câblés via `UFUNCTION` (`OnPlayClicked` / `OnQuitClicked`).
+- **`ANidalheimCharacterPreview`** : ce n'est pas un widget mais un **acteur** rig caméra (`SpringArm` + `UCineCameraComponent`), 100 % passif. Spawné par le menu de talents, attaché au mesh du joueur et utilisé comme `ViewTarget` tant que le menu est ouvert.
+
+## Tableau récapitulatif
+
+| Widget | Affiche | Source de données |
+|--------|---------|-------------------|
+| `UNidalheimPlayerHUDWidget` | Conteneur racine GAS (abilities, crosshair, AimDot, vitals) | Pilotage par `ANidalheimPlayerController` (`SetAimMode` / `SetCrosshairAllowed`) |
+| `UNidalheimHUDWidget` | Conteneur inventaire + hotbar | Délègue aux widgets enfants ; `ToggleInventory` (touche I) |
+| `UNidalheimPlayerVitalsWidget` | Vie, stamina, faim, soif, avatar | **Poll** ASC `0.1 s` — `NidalheimBasicAttributeSet` + `NidalheimSurvivalAttributeSet` |
+| `UNidalheimAbilitiesBarWidget` | Rangée de slots de capacités | **Poll** ASC `0.2 s` — `GetActivatableAbilities()` filtré sur `ShouldShowInAbilitiesBar` |
+| `UNidalheimAbilityWidget` | Icône, cooldown, compteur, cadre actif | `SetupForAbility(ASC, Handle)` + **poll** `0.05 s` (cooldown / `IsActive`) |
+| `UNidalheimEmptyAbilityWidget` | Slot vide (cadre `100×100`) | Aucune — comblement statique |
+| `UNidalheimCrosshairWidget` | Réticule en croix | Aucune — visibilité pilotée par le `PlayerHUD` |
+| `UNidalheimStatusWidget` | Conteneur horizontal d'effets (vide) | Aucune (pas encore câblé) |
+| `UNidalheimStatusEffectWidget` | Pastille effet (accumulation / icône / temps restant) | Valeurs design-time (pas encore câblé) |
+| `UNidalheimDeathScreenWidget` | Écran de mort « VOUS ÊTES MORT » + flou | Machine à états interne (`NativeTick`) |
+| `UNidalheimMainMenuWidget` | Menu principal (Jouer / Quitter) | Callbacks `UFUNCTION` |
+| `ANidalheimCharacterPreview` | Rig caméra de prévisualisation (acteur) | Passif — `ViewTarget` du menu de talents |
+
+## Voir aussi
+
+- [Attributs GAS](/docs/unreal-engine/gas/attributes)
+- [Survie](/docs/unreal-engine/survival)
+- [Chat PNJ](/docs/unreal-engine/chat)

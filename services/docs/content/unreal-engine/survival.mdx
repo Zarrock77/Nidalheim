@@ -1,0 +1,233 @@
+---
+title: Système de survie
+---
+
+# Système de survie (F19-F24)
+
+Pilier **Survie** de la beta Greenlight. Il fait vivre quatre jauges au joueur (Faim, Soif, Énergie, Vie), draine la faim et la soif dans le temps, et applique des debuffs quand une jauge tombe à zéro. Tout le drain, les debuffs et la consommation sont **autoritaires côté serveur** ; le HUD ne fait que lire les attributs répliqués.
+
+## Vue d'ensemble
+
+- **`UNidalheimSurvivalComponent`** (`Source/Nidalheim/Survival/`) — le cerveau : timer serveur, drain faim/soif, debuffs, perte de vie périodique, API `Consume()` / `Rest()`, délégués HUD.
+- **`UNidalheimSurvivalAttributeSet`** (`Source/Nidalheim/AbilitySystem/Attributes/`) — porte les jauges propres à la survie : `Hunger` / `MaxHunger` et `Thirst` / `MaxThirst`.
+- **`UNidalheimPlayerVitalsWidget`** (`Source/Nidalheim/UI/HUD/`) — affiche les deux barres de survie (faim ambre, soif bleue) en plus de la vie et de la stamina.
+- Câblage : les deux objets sont des sous-objets de `ANidalheimPlayerCharacter`.
+
+### Décisions de design
+
+- **L'énergie réutilise la `Stamina` existante** (de `UNidalheimBasicAttributeSet`), elle n'a **pas** de drain constant. Un drain de survie sur la stamina entrerait en conflit avec la régénération de stamina du combat (`GE_Status_StaminaRegen`). La survie se contente de poser le debuff `Exhausted` quand la stamina est sous un seuil, et de la recharger au repos.
+- **Quatre jauges** côté gameplay : Faim + Soif (dans `UNidalheimSurvivalAttributeSet`) + Énergie + Vie (dans `UNidalheimBasicAttributeSet`). Le set de survie n'ajoute que Faim/Soif pour ne pas alourdir le set de base.
+
+> ⚠️ La faim et la soif vivent dans `UNidalheimSurvivalAttributeSet`, mais la **vie** (`Health`) et l'**énergie** (`Stamina`) restent dans `UNidalheimBasicAttributeSet`. Le composant lit et écrit dans les deux sets.
+
+## Le composant `UNidalheimSurvivalComponent`
+
+Le composant désactive le tick frame-à-frame et se pilote par un **timer** dont la cadence est `TickInterval`. Le timer n'est armé **que sur le serveur** ; sur le client, le composant se contente de rebroadcaster les changements d'attributs répliqués vers le HUD.
+
+```cpp
+// Source/Nidalheim/Survival/NidalheimSurvivalComponent.cpp
+UNidalheimSurvivalComponent::UNidalheimSurvivalComponent()
+{
+    // On pilote la survie par un timer (TickInterval), pas par le tick frame-à-frame.
+    PrimaryComponentTick.bCanEverTick = false;
+    SetIsReplicatedByDefault(true);
+}
+```
+
+Au `BeginPlay`, il récupère l'`UAbilitySystemComponent` du propriétaire via `IAbilitySystemInterface`, s'abonne aux changements de `Hunger` / `Thirst` pour le HUD, puis arme le timer si l'acteur a l'autorité :
+
+```cpp
+// Source/Nidalheim/Survival/NidalheimSurvivalComponent.cpp
+ASC->GetGameplayAttributeValueChangeDelegate(UNidalheimSurvivalAttributeSet::GetHungerAttribute())
+    .AddUObject(this, &UNidalheimSurvivalComponent::HandleHungerChanged);
+ASC->GetGameplayAttributeValueChangeDelegate(UNidalheimSurvivalAttributeSet::GetThirstAttribute())
+    .AddUObject(this, &UNidalheimSurvivalComponent::HandleThirstChanged);
+
+// Le drain et les debuffs sont autoritaires : serveur uniquement.
+if (GetOwner()->HasAuthority())
+{
+    GetWorld()->GetTimerManager().SetTimer(
+        SurvivalTimerHandle, this, &UNidalheimSurvivalComponent::TickSurvival,
+        TickInterval, /*bLoop=*/true);
+}
+```
+
+### Boucle de survie (drain + debuffs)
+
+`TickSurvival()` gèle tout si le joueur est mort (tag `State.Dead`), sinon draine la faim et la soif, recalcule les trois debuffs, et applique la perte de vie cumulée.
+
+```cpp
+// Source/Nidalheim/Survival/NidalheimSurvivalComponent.cpp
+const float Stamina = ReadAttribute(UNidalheimBasicAttributeSet::GetStaminaAttribute());
+
+SetDebuffActive(NidalheimGameplayTags::Status_Debuff_Starving,   bStarving,   Hunger <= 0.f);
+SetDebuffActive(NidalheimGameplayTags::Status_Debuff_Dehydrated, bDehydrated, Thirst <= 0.f);
+SetDebuffActive(NidalheimGameplayTags::Status_Debuff_Exhausted,  bExhausted,  Stamina <= ExhaustionStaminaThreshold);
+
+// Perte de vie cumulée faim + soif (ignore le bouclier : la famine ne se bloque pas).
+float HealthLoss = 0.f;
+if (bStarving)   { HealthLoss += StarvationHealthLossPerSecond * Dt; }
+if (bDehydrated) { HealthLoss += DehydrationHealthLossPerSecond * Dt; }
+```
+
+Points à retenir :
+
+- La perte de vie est **cumulative** : affamé **et** déshydraté en même temps additionne les deux pertes.
+- La perte de vie **ignore le bouclier** (`Shield`) : la famine écrit directement sur la valeur de base de `Health`, clampée entre `0` et `MaxHealth`.
+- L'écart entre `bExhausted` (énergie) et les deux autres : il dépend du seuil `ExhaustionStaminaThreshold`, pas d'un zéro strict.
+
+### Pose des debuffs
+
+`SetDebuffActive()` ne change l'état que sur transition, ajoute ou retire un **loose gameplay tag répliqué** sur l'ASC, et diffuse `OnDebuffChanged` vers le HUD :
+
+```cpp
+// Source/Nidalheim/Survival/NidalheimSurvivalComponent.cpp
+if (bShouldBeActive)
+{
+    ASC->AddReplicatedLooseGameplayTag(DebuffTag);
+}
+else
+{
+    ASC->RemoveReplicatedLooseGameplayTag(DebuffTag);
+}
+
+OnDebuffChanged.Broadcast(DebuffTag, bShouldBeActive);
+```
+
+Les tags sont déclarés nativement dans `Core/NidalheimGameplayTags` (garantis enregistrés, autocomplétés, non mal-orthographiables) :
+
+| Debuff | Tag | Condition |
+|--------|-----|-----------|
+| Affamé | `Status.Debuff.Starving` | `Hunger <= 0` |
+| Déshydraté | `Status.Debuff.Dehydrated` | `Thirst <= 0` |
+| Épuisé | `Status.Debuff.Exhausted` | `Stamina <= ExhaustionStaminaThreshold` |
+
+### API consommables / repos
+
+Les deux méthodes sont `BlueprintCallable`, **serveur uniquement** (gardées par `GetOwner()->HasAuthority()`), et clampent chaque jauge par son max via les attribute sets.
+
+```cpp
+// Source/Nidalheim/Survival/NidalheimSurvivalComponent.cpp
+// Applique les restaurations d'un consommable (valeurs additives, clampées par les sets).
+void Consume(float HungerRestore, float ThirstRestore, float HealthRestore, float StaminaRestore);
+
+// Repos (F24) : recharge l'énergie (Stamina au max), soigne RestHealthAmount,
+// et coûte RestHungerCost / RestThirstCost.
+void Rest();
+```
+
+- **`Consume(...)`** ajoute (additif) faim, soif, vie et énergie, chacun plafonné au max correspondant. C'est l'entrée prévue pour l'usage d'un item d'inventaire consommable (F22/F23).
+- **`Rest()`** remet la `Stamina` au max, soigne `RestHealthAmount`, et **coûte** `RestHungerCost` de faim et `RestThirstCost` de soif (F24).
+
+### Délégués HUD
+
+| Délégué | Signature | Émis quand |
+|---------|-----------|------------|
+| `OnHungerChanged` | `(float NewValue, float MaxValue)` | La faim change (via le callback d'attribut GAS) |
+| `OnThirstChanged` | `(float NewValue, float MaxValue)` | La soif change |
+| `OnDebuffChanged` | `(FGameplayTag DebuffTag, bool bActive)` | Un debuff s'active ou se désactive |
+
+`OnHungerChanged` / `OnThirstChanged` sont rebroadcastés depuis les callbacks d'attribut GAS, ils se déclenchent donc **aussi sur le client** (via `OnRep`), pas seulement sur le serveur.
+
+## Paramètres de tuning
+
+Tous exposés en `EditAnywhere, BlueprintReadOnly` sous la catégorie `Survival|Tuning`. Valeurs par défaut réelles du code :
+
+| Paramètre | Type | Défaut | Rôle |
+|-----------|------|--------|------|
+| `TickInterval` | `float` | `1.0` | Cadence du timer de survie, en secondes (`ClampMin 0.1`) |
+| `HungerDecayPerSecond` | `float` | `0.25` | Faim perdue par seconde |
+| `ThirstDecayPerSecond` | `float` | `0.40` | Soif perdue par seconde (descend plus vite que la faim) |
+| `StarvationHealthLossPerSecond` | `float` | `1.0` | Vie perdue par seconde tant que la faim est à 0 |
+| `DehydrationHealthLossPerSecond` | `float` | `1.5` | Vie perdue par seconde tant que la soif est à 0 |
+| `ExhaustionStaminaThreshold` | `float` | `1.0` | Seuil de `Stamina` sous lequel le debuff `Exhausted` est posé |
+| `RestHealthAmount` | `float` | `25.0` | Vie rendue par un repos |
+| `RestHungerCost` | `float` | `15.0` | Faim consommée par un repos |
+| `RestThirstCost` | `float` | `15.0` | Soif consommée par un repos |
+
+## L'attribute set de survie
+
+`UNidalheimSurvivalAttributeSet` n'ajoute que les deux jauges propres à la survie. Toutes initialisées à `100` :
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Attributes/NidalheimSurvivalAttributeSet.cpp
+UNidalheimSurvivalAttributeSet::UNidalheimSurvivalAttributeSet()
+{
+    Hunger = 100.f;
+    MaxHunger = 100.f;
+    Thirst = 100.f;
+    MaxThirst = 100.f;
+}
+```
+
+Chaque attribut est répliqué avec son `OnRep_*` et clampé dans `PreAttributeChange` entre `0` et son max. C'est ce clamp qui garantit le plafond : le composant ne pose qu'un plancher à `0` côté écriture.
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Attributes/NidalheimSurvivalAttributeSet.cpp
+if (Attribute == GetHungerAttribute())
+{
+    NewValue = FMath::Clamp(NewValue, 0.f, GetMaxHunger());
+}
+else if (Attribute == GetThirstAttribute())
+{
+    NewValue = FMath::Clamp(NewValue, 0.f, GetMaxThirst());
+}
+```
+
+## Câblage dans `ANidalheimPlayerCharacter`
+
+L'attribute set et le composant sont des sous-objets créés au constructeur du joueur. L'attribute set est **auto-enregistré** par l'ASC parce qu'il est un sous-objet du pawn ; le composant porte la logique.
+
+```cpp
+// Source/Nidalheim/Character/NidalheimPlayerCharacter.cpp
+// Survie (F19-F24) : l'attribute set est auto-enregistré par l'ASC (sous-objet du pawn),
+// le composant porte le drain / les debuffs / la consommation.
+SurvivalAttributeSet = CreateDefaultSubobject<UNidalheimSurvivalAttributeSet>(TEXT("SurvivalAttributeSet"));
+Survival = CreateDefaultSubobject<UNidalheimSurvivalComponent>(TEXT("Survival"));
+```
+
+Comme le set de survie n'existe que sur le pawn joueur, tout lecteur GAS (HUD compris) doit garder avec `HasAttributeSetForAttribute(...)` pour éviter les warnings sur les pawns non-joueurs.
+
+## Les barres HUD du `UNidalheimPlayerVitalsWidget`
+
+Le widget de vitals construit son arbre Slate en C++ (`RebuildWidget`) et poll les attributs de l'ASC toutes les `0.1 s`. En plus de la vie et de la stamina (textures dédiées), il dessine deux barres de survie en **aplat de couleur** (pas d'asset art requis, rendu garanti pour la démo) :
+
+```cpp
+// Source/Nidalheim/UI/HUD/NidalheimPlayerVitalsWidget.cpp
+// Couleurs des jauges de survie (faim ambre, soif bleue) — barres en aplat, pas d'asset requis.
+const FLinearColor HungerFillColor(0.85f, 0.52f, 0.12f, 1.0f);
+const FLinearColor ThirstFillColor(0.16f, 0.55f, 0.88f, 1.0f);
+const FLinearColor SurvivalBarBackgroundColor(0.02f, 0.02f, 0.02f, 0.65f);
+```
+
+La barre de **faim** est placée sous la stamina, la barre de **soif** sous la faim, alignées sur les mêmes X et largeur. Le poll lit la valeur courante et la divise par le max, sous garde de présence du set :
+
+```cpp
+// Source/Nidalheim/UI/HUD/NidalheimPlayerVitalsWidget.cpp
+if (HungerBar && ASC->HasAttributeSetForAttribute(UNidalheimSurvivalAttributeSet::GetHungerAttribute()))
+{
+    const float Hunger = ASC->GetNumericAttribute(UNidalheimSurvivalAttributeSet::GetHungerAttribute());
+    const float MaxHunger = ASC->GetNumericAttribute(UNidalheimSurvivalAttributeSet::GetMaxHungerAttribute());
+    HungerBar->SetPercent(MaxHunger > 0.f ? Hunger / MaxHunger : 0.f);
+}
+```
+
+> ⚠️ Le widget ne s'abonne **pas** aux délégués `OnHungerChanged` / `OnThirstChanged` du composant : il fait un poll par timer à `0.1 s`. Les délégués du composant restent disponibles pour tout autre consommateur HUD (effets de statut, alertes).
+
+## État roadmap
+
+| Feature | État | Détail |
+|---------|------|--------|
+| **F19** Jauges faim/soif | Fait | Attribute set + barres HUD ambre/bleue |
+| **F20** Debuffs | Fait | Tags `Starving` / `Dehydrated` / `Exhausted` + perte de vie périodique |
+| **F21** Santé / debuffs vitaux | Fait | Perte de vie cumulée faim + soif, ignore le bouclier |
+| **F22 / F23** Consommables | Backend prêt, non câblé | `Consume(...)` existe mais n'est pas relié à l'inventaire |
+| **F24** Repos | Backend prêt, non câblé | `Rest()` existe mais n'est pas relié à l'inventaire |
+
+> ⚠️ `Consume()` et `Rest()` sont implémentés et testables, mais le câblage côté inventaire reste à faire. Dans `NidalheimHotbarComponent::ActivateSlot`, la branche `case ENidalheimItemType::Consumable:` est vide (`// TODO (migration consommables) : appliquer l'effet associé.`). Tant que cette branche n'appelle pas `Consume(...)`, utiliser un consommable depuis la hotbar ne fait rien.
+
+## Voir aussi
+
+- [Attributs GAS](/docs/unreal-engine/gas/attributes)
+- [Inventaire](/docs/unreal-engine/inventory)
+- [HUD](/docs/unreal-engine/hud)
