@@ -26,7 +26,13 @@ export function handleValidateMission(state: MissionState, argsJson: string): Va
     /* args vides ou invalides -> on prend la mission active */
   }
 
-  const mission = requestedId ? state.find(requestedId) : state.active();
+  // Resolution tolerante : le modele passe parfois le NOM au lieu de l'id, ou un id inconnu.
+  // On tente id, puis nom, puis on retombe sur la mission active (la validation est de toute
+  // facon client-authoritative, basee sur l'inventaire reel).
+  let mission = requestedId
+    ? state.find(requestedId) ?? state.all().find((m) => m.name.toLowerCase() === requestedId!.toLowerCase())
+    : undefined;
+  if (!mission) mission = state.active();
 
   if (!mission) {
     return {

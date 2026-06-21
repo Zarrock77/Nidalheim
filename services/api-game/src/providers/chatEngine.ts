@@ -29,6 +29,45 @@ export interface ChatRespondOptions {
 const MAX_TOOL_ROUNDS = 4;
 
 /**
+ * Certains modeles (Llama via Groq) emettent un appel d'outil EN TEXTE dans le contenu
+ * ("<function=name>{args}</function>") au lieu d'un tool_call structure. On l'extrait pour en
+ * faire un VRAI tool_call (l'outil s'execute), et on renvoie le texte debarrasse du fragment.
+ */
+function extractTextToolCalls(content: string): { calls: SdkToolCall[]; cleaned: string } {
+  const re = /<function\s*=\s*"?([a-zA-Z0-9_.-]+)"?\s*>([\s\S]*?)<\/function\s*>/gi;
+  const calls: SdkToolCall[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(content)) !== null) {
+    const rawArgs = (m[2] || "").trim();
+    calls.push({
+      id: `txt_${m[1]}_${calls.length}`,
+      type: "function",
+      function: { name: m[1], arguments: rawArgs.startsWith("{") ? rawArgs : "{}" },
+    });
+  }
+  const cleaned = content
+    .replace(re, "")
+    .replace(/<\/?function\b[^>]*>/gi, "") // balises orphelines (appel tronque par le modele)
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return { calls, cleaned };
+}
+
+/**
+ * Unifie les deux formats de tool-call du modele. Si le contenu contient une syntaxe d'outil
+ * en texte, on la convertit en tool_call structure (quand il n'y en a pas deja) et on nettoie
+ * toujours le texte affiche. Ainsi l'outil s'EXECUTE vraiment au lieu d'etre juste masque.
+ */
+function normalizeToolCalls(text: string, structured: SdkToolCall[]): { text: string; toolCalls: SdkToolCall[] } {
+  if (!/<\/?function\b/i.test(text)) {
+    return { text, toolCalls: structured };
+  }
+  const { calls, cleaned } = extractTextToolCalls(text);
+  return { text: cleaned, toolCalls: structured.length ? structured : calls };
+}
+
+/**
  * Moteur de chat unifie pour le texte ET le vocal.
  * Groq en primaire, bascule sur OpenAI si Groq echoue (cle absente, erreur, rate-limit).
  * Gere le function-calling (tools) avec boucle d'appel + accumulation des tool_calls en streaming.
@@ -148,11 +187,11 @@ export class ChatEngine {
       const toolCalls: SdkToolCall[] = Object.values(acc)
         .filter((a) => a.name)
         .map((a) => ({ id: a.id, type: "function", function: { name: a.name, arguments: a.args } }));
-      return { text: full, toolCalls };
+      return normalizeToolCalls(full, toolCalls);
     }
 
     const res = await client.chat.completions.create({ model, messages: msgs, tools });
     const m = res.choices[0]?.message;
-    return { text: m?.content ?? "", toolCalls: (m?.tool_calls ?? []) as SdkToolCall[] };
+    return normalizeToolCalls(m?.content ?? "", (m?.tool_calls ?? []) as SdkToolCall[]);
   }
 }
