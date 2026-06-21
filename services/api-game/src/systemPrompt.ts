@@ -1,14 +1,13 @@
 import type { Npc } from "./types.js";
-import type { QuestChatState } from "./questStore.js";
-import { FIRST_QUEST_DESCRIPTION } from "./questCatalog.js";
+import type { ClientMission } from "./missionState.js";
 
 /**
  * System prompt envoye au LLM — IDENTIQUE pour le chat texte et le chat vocal.
- * Point unique d'assemblage : contexte de quete + consigne d'usage du tool quest_next.
- * `questState` reflete l'etat reel (table quests) : le PNJ ne propose la mission que si
- * rien n'est en cours ('none'), la rappelle sans la relancer ('open'), et felicite ('done').
+ * Ancre de coherence : la personnalite de base du PNJ (`npc.systemPrompt`, table `npcs`).
+ * Par-dessus, on superpose les missions definies par le client (IR du donjon) avec leur etat
+ * courant. Le PNJ valide via le tool `validate_mission` (jamais de felicitations sans resultat positif).
  */
-export function buildSystemPrompt(npc: Npc, questState: QuestChatState): string {
+export function buildSystemPrompt(npc: Npc, missions: ClientMission[]): string {
   const lines = [
     npc.systemPrompt,
     "",
@@ -16,35 +15,38 @@ export function buildSystemPrompt(npc: Npc, questState: QuestChatState): string 
     "",
   ];
 
-  switch (questState) {
-    case "open":
-      lines.push(
-        "Le joueur a DEJA recu la mission de defense du village (repousser les pilleurs dans la foret) : elle est en cours.",
-        "Ne lui propose PAS de nouvelle mission et ne relance jamais celle-ci.",
-        "Reponds TOUJOURS d'abord a ce que le joueur te dit ; ne ramene pas la conversation a la mission s'il ne t'en parle pas.",
-        "S'il te parle de la mission, rappelle-lui simplement l'objectif : les pilleurs sont dans la foret, plus loin entre les arbres.",
-        "Pour tout le reste, converse normalement, en restant dans ton role et en variant tes reponses.",
-      );
-      break;
-    case "done":
-      lines.push(
-        "Le joueur a DEJA accompli la mission de defense du village : les pilleurs de la foret ont ete repousses.",
-        "S'il te parle de la mission, felicite-le pour sa victoire.",
-        "Il n'y a pas de nouvelle mission disponible pour le moment ; s'il en redemande une, dis-le-lui simplement.",
-        "Pour tout le reste, converse normalement, en restant dans ton role et en variant tes reponses.",
-      );
-      break;
-    case "none":
-      lines.push(
-        "Mission que tu peux confier au joueur s'il se montre volontaire :",
-        FIRST_QUEST_DESCRIPTION,
-        "Reponds TOUJOURS d'abord a ce que le joueur te dit ; ne ramene pas chaque sujet a cette mission.",
-        "Tu peux evoquer ton inquietude au sujet des pilleurs quand c'est naturel, sans insister a chaque message.",
-        "N'appelle l'outil 'quest_next' QUE si le joueur demande une mission/quete ou accepte explicitement d'aider contre les pilleurs — jamais de ta propre initiative.",
-        "Apres avoir appele l'outil, confirme en une phrase qu'il doit filer dans la foret, plus loin entre les arbres.",
-      );
-      break;
+  if (missions.length === 0) {
+    lines.push(
+      "Aucune mission n'est definie pour le moment. Accueille le voyageur et converse normalement, en restant dans ton role.",
+    );
+    return lines.join("\n");
   }
+
+  lines.push(
+    "Le joueur s'est vu confier la (les) mission(s) ci-dessous. Respecte la consigne de role de chaque mission (qui tu es, comment accueillir le joueur, et ce qu'il doit accomplir avant que tu l'autorises a poursuivre).",
+    "Missions (definies par le donjon ; etat tenu a jour par le client) :",
+  );
+
+  for (const m of missions) {
+    const status = m.completed
+      ? "ACCOMPLIE"
+      : m.hasObjectiveItem
+        ? "objet en sa possession — tu peux la valider"
+        : "en cours — le joueur n'a pas encore l'objet";
+    lines.push(`- « ${m.name} » [${status}] : ${m.objectiveDescription}`);
+    if (m.missionPrompt) {
+      lines.push(`  Consigne de role : ${m.missionPrompt}`);
+    }
+  }
+
+  lines.push(
+    "",
+    "Regles de validation :",
+    "- Quand le joueur affirme avoir accompli une mission ou rapporte l'objet, appelle TOUJOURS l'outil 'validate_mission' AVANT de te prononcer.",
+    "- Ne felicite le joueur et ne declare une mission accomplie QUE si l'outil renvoie un resultat positif.",
+    "- N'invente jamais qu'une mission est faite : fie-toi uniquement au resultat de l'outil.",
+    "- Reponds TOUJOURS d'abord a ce que le joueur te dit ; reste dans ton role et varie tes reponses.",
+  );
 
   return lines.join("\n");
 }

@@ -10,11 +10,12 @@ import { HttpRouter, sendJson } from "./httpRouter.js";
 import { getNpc } from "./npcStore.js";
 import { ChatEngine } from "./providers/chatEngine.js";
 import { buildSystemPrompt } from "./systemPrompt.js";
-import { QUEST_NEXT_TOOL } from "./questCatalog.js";
+import { MISSION_VALIDATE_TOOL } from "./missionCatalog.js";
+import { handleValidateMission } from "./missionTool.js";
+import { acquireMissionState, releaseMissionState, parseMissionSync, type MissionState } from "./missionState.js";
 import { QuestGenerator } from "./questGenerator.js";
-import { tryLaunchFirstQuest } from "./questLaunch.js";
 import { registerQuestRoutes } from "./questRoutes.js";
-import { QuestStore, type QuestChatState } from "./questStore.js";
+import { QuestStore } from "./questStore.js";
 import type { AuthenticatedUser, ChatMessage, Npc } from "./types.js";
 
 config({ path: "../../infra/.env" });
@@ -36,10 +37,6 @@ function startHeartbeat(ws: WebSocket): void {
   }, 30000);
 }
 
-interface TextConnectionDeps {
-  questStore: QuestStore;
-}
-
 // Moteur de chat unifie texte + vocal : Groq en primaire, OpenAI en fallback.
 // Modele dedie au chat (function-calling fiable) — distinct du LLM_MODEL du generateur de quetes.
 const chatEngine = new ChatEngine({
@@ -54,19 +51,20 @@ async function handleTextConnection(
   websocket: WebSocket,
   user: AuthenticatedUser,
   npc: Npc,
-  deps: TextConnectionDeps,
 ): Promise<void> {
   console.log(`Client connected to text endpoint (user: ${user.username}, npc: ${npc.id})`);
   startHeartbeat(websocket);
 
   const store = new ConversationStore({ maxHistory: 20 });
+  // Etat des missions partage avec le canal vocal du meme joueur (cf. missionState.ts).
+  const missionState = acquireMissionState(user.id, npc.id);
 
   websocket.on("message", async (message) => {
     const userText = message.toString().trim();
     if (!userText) return;
 
-    // Messages de controle JSON du client (ex: quete terminee) — ne passent jamais par le LLM.
-    if (userText.startsWith("{") && await handleTextControlMessage(websocket, user, npc, deps, userText)) {
+    // Messages de controle JSON du client (ex: mission_sync) — ne passent jamais par le LLM.
+    if (userText.startsWith("{") && handleTextControlMessage(user, npc, missionState, userText)) {
       return;
     }
     console.log(`[text ${user.username}/${npc.id}] user: ${userText}`);
@@ -79,16 +77,9 @@ async function handleTextConnection(
       console.error(`[text ${user.username}/${npc.id}] history load failed:`, (err as Error)?.message ?? err);
     }
 
-    // Etat de quete recharge a CHAQUE tour : pilote la variante de prompt et l'exposition du tool.
-    let questState: QuestChatState = "none";
-    try {
-      questState = await deps.questStore.getQuestChatState(user.id);
-    } catch (err) {
-      console.error(`[text ${user.username}/${npc.id}] quest state load failed:`, (err as Error)?.message ?? err);
-    }
-
+    const missions = missionState.all();
     const messages = [
-      { role: "system" as const, content: buildSystemPrompt(npc, questState) },
+      { role: "system" as const, content: buildSystemPrompt(npc, missions) },
       ...history,
       { role: "user" as const, content: userText },
     ];
@@ -96,18 +87,16 @@ async function handleTextConnection(
     let reply: string;
     try {
       reply = await chatEngine.respond(messages, {
-        tools: questState === "none" ? [QUEST_NEXT_TOOL] : [],
-        onToolCall: async (name) => {
-          if (name === "quest_next") {
-            const quest = await tryLaunchFirstQuest(deps.questStore, user.id, npc.id);
-            if (!quest) {
-              return "Une quete est deja en cours pour ce joueur : n'en relance pas. Reponds normalement.";
-            }
+        // Tool de validation expose des qu'une mission existe ; le prompt regule quand l'appeler.
+        tools: missions.length ? [MISSION_VALIDATE_TOOL] : [],
+        onToolCall: async (name, argumentsJson) => {
+          if (name === "validate_mission") {
+            const outcome = handleValidateMission(missionState, argumentsJson);
             if (websocket.readyState === WebSocket.OPEN) {
-              websocket.send(JSON.stringify({ type: "quest_offer", payload: quest }));
+              websocket.send(JSON.stringify({ type: "mission_validation_result", missionId: outcome.missionId, ok: outcome.ok }));
             }
-            console.log(`[text ${user.username}/${npc.id}] quest_next -> ${quest.questId}`);
-            return "Quete de defense du village lancee et envoyee au joueur. Confirme-lui d'aller dans la foret.";
+            console.log(`[text ${user.username}/${npc.id}] validate_mission ${outcome.missionId ?? "-"} -> ok=${outcome.ok}`);
+            return outcome.toolResult;
           }
           return `tool inconnu: ${name}`;
         },
@@ -127,6 +116,7 @@ async function handleTextConnection(
   });
 
   websocket.on("close", () => {
+    releaseMissionState(user.id, npc.id);
     console.log(`Client disconnected from text endpoint (user: ${user.username}, npc: ${npc.id})`);
   });
 
@@ -136,35 +126,29 @@ async function handleTextConnection(
 }
 
 /**
- * Traite un message de controle JSON envoye par le client sur le canal texte
- * (`{"type":"quest_complete","questId":"..."}` quand l'objectif est atteint en jeu).
- * Retourne true si le message a ete consomme — il ne doit alors pas partir au LLM.
+ * Traite un message de controle JSON envoye par le client sur le canal texte.
+ * `mission_sync` : le client (IR du donjon) pousse la liste des missions + leur etat
+ * (objectif possede, terminee). Retourne true si le message a ete consomme — il ne doit
+ * alors pas partir au LLM.
  */
-async function handleTextControlMessage(
-  websocket: WebSocket,
+function handleTextControlMessage(
   user: AuthenticatedUser,
   npc: Npc,
-  deps: TextConnectionDeps,
+  missionState: MissionState,
   raw: string,
-): Promise<boolean> {
-  let ctrl: { type?: unknown; questId?: unknown };
+): boolean {
+  let ctrl: { type?: unknown; missions?: unknown };
   try {
-    ctrl = JSON.parse(raw) as { type?: unknown; questId?: unknown };
+    ctrl = JSON.parse(raw) as { type?: unknown; missions?: unknown };
   } catch {
     return false; // pas du JSON valide -> message de chat normal
   }
   if (typeof ctrl.type !== "string") return false;
 
-  if (ctrl.type === "quest_complete" && typeof ctrl.questId === "string") {
-    try {
-      const completed = await deps.questStore.completeQuest(user.id, ctrl.questId, { source: "client" });
-      console.log(`[text ${user.username}/${npc.id}] quest_complete ${ctrl.questId} -> ${completed ? completed.status : "not found"}`);
-      if (websocket.readyState === WebSocket.OPEN) {
-        websocket.send(JSON.stringify({ type: "quest_completed", questId: ctrl.questId, ok: !!completed }));
-      }
-    } catch (err) {
-      console.error(`[text ${user.username}/${npc.id}] quest_complete failed:`, (err as Error)?.message ?? err);
-    }
+  if (ctrl.type === "mission_sync") {
+    const missions = parseMissionSync(ctrl as { missions?: unknown });
+    missionState.replaceAll(missions);
+    console.log(`[text ${user.username}/${npc.id}] mission_sync -> ${missions.length} mission(s)`);
     return true;
   }
 
@@ -316,7 +300,7 @@ function main(): void {
 
     if (path === "/text") {
       wss.handleUpgrade(request, socket, head, (ws) => {
-        void handleTextConnection(ws, user, npc, { questStore });
+        void handleTextConnection(ws, user, npc);
       });
     } else if (path === "/audio") {
       wss.handleUpgrade(request, socket, head, (ws) => {

@@ -7,9 +7,9 @@ import { CartesiaStreamingTTS } from "./providers/cartesia.js";
 import { ChatEngine } from "./providers/chatEngine.js";
 import { buildSystemPrompt } from "./systemPrompt.js";
 import { ConversationStore } from "./conversationStore.js";
-import { QuestStore, type QuestChatState } from "./questStore.js";
-import { QUEST_NEXT_TOOL } from "./questCatalog.js";
-import { tryLaunchFirstQuest } from "./questLaunch.js";
+import { MISSION_VALIDATE_TOOL } from "./missionCatalog.js";
+import { handleValidateMission } from "./missionTool.js";
+import { acquireMissionState, releaseMissionState, type MissionState } from "./missionState.js";
 import type { AuthenticatedUser, ChatMessage, Npc } from "./types.js";
 
 const KEEPALIVE_INTERVAL_MS = 8000;
@@ -85,7 +85,7 @@ export class AudioPipeline {
   private readonly engine: ChatEngine;
   private readonly ttsRoute: TTSRoute;
   private readonly conversationStore: ConversationStore;
-  private readonly questStore: QuestStore;
+  private readonly missionState: MissionState;
 
   private utteranceInFlight = false;
   private pendingTranscript = "";
@@ -114,7 +114,8 @@ export class AudioPipeline {
     });
     this.ttsRoute = makeTTS(config);
     this.conversationStore = new ConversationStore({ maxHistory: 20 });
-    this.questStore = new QuestStore();
+    // Etat des missions partage avec le canal texte du meme joueur (cf. missionState.ts).
+    this.missionState = acquireMissionState(user.id, npc.id);
   }
 
   async start(): Promise<void> {
@@ -297,16 +298,9 @@ export class AudioPipeline {
     } catch (err) {
       console.error(`[pipeline ${this.user.username}/${this.npc.id}] history load failed:`, (err as Error)?.message ?? err);
     }
-    // Etat de quete recharge a CHAQUE tour : pilote la variante de prompt et l'exposition du tool.
-    let questState: QuestChatState = "none";
-    try {
-      questState = await this.questStore.getQuestChatState(this.user.id);
-    } catch (err) {
-      console.error(`[pipeline ${this.user.username}/${this.npc.id}] quest state load failed:`, (err as Error)?.message ?? err);
-    }
-
+    const missions = this.missionState.all();
     const messages = [
-      { role: "system" as const, content: buildSystemPrompt(this.npc, questState) },
+      { role: "system" as const, content: buildSystemPrompt(this.npc, missions) },
       ...history,
       { role: "user" as const, content: userText },
     ];
@@ -314,16 +308,14 @@ export class AudioPipeline {
     try {
       const full = await this.engine.respond(messages, {
         stream: true,
-        tools: questState === "none" ? [QUEST_NEXT_TOOL] : [],
-        onToolCall: async (name) => {
-          if (name === "quest_next") {
-            const quest = await tryLaunchFirstQuest(this.questStore, this.user.id, this.npc.id);
-            if (!quest) {
-              return "Une quete est deja en cours pour ce joueur : n'en relance pas. Reponds normalement.";
-            }
-            this._send({ type: "quest_offer", payload: quest });
-            console.log(`[pipeline ${this.user.username}/${this.npc.id}] quest_next -> ${quest.questId}`);
-            return "Quete de defense du village lancee et envoyee au joueur. Confirme-lui d'aller dans la foret.";
+        // Tool de validation expose des qu'une mission existe ; le prompt regule quand l'appeler.
+        tools: missions.length ? [MISSION_VALIDATE_TOOL] : [],
+        onToolCall: async (name, argumentsJson) => {
+          if (name === "validate_mission") {
+            const outcome = handleValidateMission(this.missionState, argumentsJson);
+            this._send({ type: "mission_validation_result", missionId: outcome.missionId, ok: outcome.ok });
+            console.log(`[pipeline ${this.user.username}/${this.npc.id}] validate_mission ${outcome.missionId ?? "-"} -> ok=${outcome.ok}`);
+            return outcome.toolResult;
           }
           return `tool inconnu: ${name}`;
         },
@@ -367,6 +359,7 @@ export class AudioPipeline {
   shutdown(): void {
     if (this.disposed) return;
     this.disposed = true;
+    releaseMissionState(this.user.id, this.npc.id);
     if (this.keepAliveTimer) {
       clearInterval(this.keepAliveTimer);
       this.keepAliveTimer = null;
