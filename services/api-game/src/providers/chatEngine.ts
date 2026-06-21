@@ -26,8 +26,6 @@ export interface ChatRespondOptions {
   onToolCall?: (name: string, argumentsJson: string) => Promise<string> | string;
 }
 
-const MAX_TOOL_ROUNDS = 4;
-
 /**
  * Certains modeles (Llama via Groq) emettent un appel d'outil EN TEXTE dans le contenu
  * ("<function=name>{args}</function>") au lieu d'un tool_call structure. On l'extrait pour en
@@ -70,7 +68,8 @@ function normalizeToolCalls(text: string, structured: SdkToolCall[]): { text: st
 /**
  * Moteur de chat unifie pour le texte ET le vocal.
  * Groq en primaire, bascule sur OpenAI si Groq echoue (cle absente, erreur, rate-limit).
- * Gere le function-calling (tools) avec boucle d'appel + accumulation des tool_calls en streaming.
+ * Function-calling en DEUX phases : un appel "decision" (tools, interne, texte ignore) puis un
+ * appel "dialogue" SANS tool -> le texte montre au joueur ne peut pas contenir de fuite d'outil.
  *
  * En streaming : si Groq lache APRES avoir deja emis du texte, on ne rebascule PAS sur OpenAI
  * (sinon le TTS recevrait la reponse en double) — on remonte l'erreur.
@@ -118,7 +117,15 @@ export class ChatEngine {
     throw lastErr ?? new Error("ChatEngine: tous les providers ont echoue");
   }
 
-  /** Boucle conversationnelle : appelle le LLM, execute les tools demandes, recommence jusqu'a une reponse texte. */
+  /**
+   * Deux phases, proprement SEPAREES :
+   *  1. DECISION (interne) : si des tools sont exposes, un appel NON-streame decide d'eventuels
+   *     appels d'outil. Son texte est IGNORE (jamais montre au joueur) ; les tools sont executes
+   *     et leurs resultats injectes dans le contexte.
+   *  2. DIALOGUE (joueur) : un appel SANS aucun tool genere la reponse affichee/streamee. Aucun
+   *     tool n'etant expose ici, il est IMPOSSIBLE qu'un nom d'outil/une syntaxe d'appel fuite, et
+   *     il n'y a plus de narration pre-appel concatenee (plus de repetitions).
+   */
   private async _runConversation(
     client: OpenAI,
     model: string,
@@ -128,34 +135,28 @@ export class ChatEngine {
   ): Promise<string> {
     const msgs: SdkMessage[] = baseMessages.map((m) => ({ role: m.role, content: m.content }));
     const useTools = !!(opts.tools && opts.tools.length && opts.onToolCall);
-    const maxRounds = useTools ? MAX_TOOL_ROUNDS : 1;
 
-    // Accumule le texte de TOUS les tours -> reste coherent avec ce qui a ete streame au TTS
-    // (le modele peut narrer un peu avant d'appeler le tool, puis confirmer apres).
-    let finalText = "";
-    for (let round = 0; round < maxRounds; round++) {
-      // Au dernier tour, on retire les tools pour forcer une reponse texte (anti-boucle).
-      const tools = useTools && round < maxRounds - 1 ? opts.tools : undefined;
-      const { text, toolCalls } = await this._callOnce(client, model, msgs, tools, opts.stream === true, onDelta);
-      finalText += text;
-
-      if (toolCalls.length && opts.onToolCall) {
-        msgs.push({ role: "assistant", content: text || null, tool_calls: toolCalls });
+    // Phase 1 — DECISION (texte ignore). Le modele appelle 0..n tools ; on les execute.
+    if (useTools) {
+      const { toolCalls } = await this._callOnce(client, model, msgs, opts.tools, false, undefined);
+      if (toolCalls.length) {
+        msgs.push({ role: "assistant", content: null, tool_calls: toolCalls });
         for (const tc of toolCalls) {
           if (tc.type !== "function") continue;
           let result = "ok";
           try {
-            result = await opts.onToolCall(tc.function.name, tc.function.arguments);
+            result = await opts.onToolCall!(tc.function.name, tc.function.arguments);
           } catch (err) {
             result = `error: ${(err as Error)?.message ?? err}`;
           }
           msgs.push({ role: "tool", tool_call_id: tc.id, content: result });
         }
-        continue;
       }
-      return finalText;
     }
-    return finalText;
+
+    // Phase 2 — DIALOGUE joueur, SANS tool (aucune fuite possible), streame vers le TTS si demande.
+    const { text } = await this._callOnce(client, model, msgs, undefined, opts.stream === true, onDelta);
+    return text;
   }
 
   private async _callOnce(

@@ -29,11 +29,17 @@ export function buildSystemPrompt(npc: Npc, missions: ClientMission[]): string {
   );
 
   for (const m of missions) {
-    const status = m.completed
-      ? "ACCOMPLIE"
-      : m.hasObjectiveItem
-        ? "objet en sa possession — tu peux la valider"
-        : "pas encore accomplie — le joueur n'a pas encore l'objet";
+    // Mission DEJA accomplie : on ne reinjecte PAS sa consigne de role (sinon le PNJ re-gate et
+    // redemande l'epreuve alors qu'elle est faite). Message clair : close, ne rien re-verifier.
+    if (m.completed) {
+      lines.push(
+        `- « ${m.name} » [ACCOMPLIE] : le joueur a DEJA reussi cette epreuve et obtenu ce qu'elle donne (il est admis au village). Considere-la comme close : ne lui redemande jamais de l'accomplir et ne re-verifie rien.`,
+      );
+      continue;
+    }
+    const status = m.hasObjectiveItem
+      ? "objet en sa possession — tu peux la valider"
+      : "pas encore accomplie — le joueur n'a pas encore l'objet";
     lines.push(`- « ${m.name} » [${status}] : ${m.objectiveDescription}`);
     if (m.missionPrompt) {
       lines.push(`  Consigne de role : ${m.missionPrompt}`);

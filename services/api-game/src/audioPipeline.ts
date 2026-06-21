@@ -308,8 +308,9 @@ export class AudioPipeline {
     try {
       const full = await this.engine.respond(messages, {
         stream: true,
-        // Tool de validation expose des qu'une mission existe ; le prompt regule quand l'appeler.
-        tools: missions.length ? [MISSION_VALIDATE_TOOL] : [],
+        // Tool expose UNIQUEMENT quand il peut servir : mission active + objet en main (cas ou la
+        // validation peut reussir). Sinon aucun tool -> le prompt gere le dialogue (et zero fuite).
+        tools: missions.some((m) => !m.completed && m.hasObjectiveItem) ? [MISSION_VALIDATE_TOOL] : [],
         onToolCall: async (name, argumentsJson) => {
           if (name === "validate_mission") {
             const outcome = handleValidateMission(this.missionState, argumentsJson);
