@@ -90,4 +90,11 @@ export class ConversationStore {
       client.release();
     }
   }
+
+  /** Supprime TOUT l'historique de chat d'un joueur (reset du jeu cote client). */
+  async clearHistory(userId: string | null | undefined): Promise<void> {
+    if (!userId) return;
+    const pool = getPool();
+    await pool.query(`DELETE FROM chat_messages WHERE user_id = $1`, [userId]);
+  }
 }

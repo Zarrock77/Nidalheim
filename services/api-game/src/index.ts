@@ -63,8 +63,8 @@ async function handleTextConnection(
     const userText = message.toString().trim();
     if (!userText) return;
 
-    // Messages de controle JSON du client (ex: mission_sync) — ne passent jamais par le LLM.
-    if (userText.startsWith("{") && handleTextControlMessage(user, npc, missionState, userText)) {
+    // Messages de controle JSON du client (ex: mission_sync, clear_history) — ne passent jamais par le LLM.
+    if (userText.startsWith("{") && handleTextControlMessage(user, npc, missionState, store, userText)) {
       return;
     }
     console.log(`[text ${user.username}/${npc.id}] user: ${userText}`);
@@ -136,6 +136,7 @@ function handleTextControlMessage(
   user: AuthenticatedUser,
   npc: Npc,
   missionState: MissionState,
+  store: ConversationStore,
   raw: string,
 ): boolean {
   let ctrl: { type?: unknown; missions?: unknown };
@@ -150,6 +151,15 @@ function handleTextControlMessage(
     const missions = parseMissionSync(ctrl as { missions?: unknown });
     missionState.replaceAll(missions);
     console.log(`[text ${user.username}/${npc.id}] mission_sync -> ${missions.length} mission(s)`);
+    return true;
+  }
+
+  if (ctrl.type === "clear_history") {
+    // Reset du jeu : le client demande l'effacement de tout l'historique de chat du joueur.
+    store
+      .clearHistory(user.id)
+      .then(() => console.log(`[text ${user.username}/${npc.id}] clear_history -> historique efface`))
+      .catch((err) => console.error(`[text ${user.username}/${npc.id}] clear_history failed:`, (err as Error)?.message ?? err));
     return true;
   }
 
