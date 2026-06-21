@@ -42,7 +42,8 @@ export function buildSystemPrompt(npc: Npc, missions: ClientMission[]): string {
 
   lines.push(
     "",
-    "Regles de validation :",
+    "Regles :",
+    "- Reste TRES bref : 1 a 2 phrases COURTES maximum, meme pour presenter une epreuve. Ne repete jamais la meme idee dans un message.",
     "- Quand le joueur affirme avoir accompli une mission ou rapporte l'objet, appelle TOUJOURS l'outil 'validate_mission' AVANT de te prononcer.",
     "- Ne felicite le joueur et ne declare une mission accomplie QUE si l'outil renvoie un resultat positif.",
     "- N'invente jamais qu'une mission est faite : fie-toi uniquement au resultat de l'outil.",

@@ -43,6 +43,13 @@
       "when": 1782049092096,
       "tag": "0005_olaf_identity",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1782052371819,
+      "tag": "0006_olaf_concise",
+      "breakpoints": true
     }
   ]
 }
