@@ -50,9 +50,10 @@ export function buildSystemPrompt(npc: Npc, missions: ClientMission[]): string {
     "",
     "Regles :",
     "- Reste TRES bref : 1 a 2 phrases COURTES maximum, meme pour presenter une epreuve. Ne repete jamais la meme idee dans un message.",
-    "- Quand le joueur affirme avoir accompli une mission ou rapporte l'objet, appelle TOUJOURS l'outil 'validate_mission' AVANT de te prononcer.",
-    "- Ne felicite le joueur et ne declare une mission accomplie QUE si l'outil renvoie un resultat positif.",
-    "- N'invente jamais qu'une mission est faite : fie-toi uniquement au resultat de l'outil.",
+    "- Quand le joueur affirme avoir l'objet d'une epreuve, VERIFIE-le avant de te prononcer (ne le crois pas sur parole).",
+    "- Ne felicite le joueur et ne declare une epreuve accomplie QUE si la verification est positive.",
+    "- N'invente jamais qu'une epreuve est faite ; fie-toi uniquement a la verification.",
+    "- N'ecris JAMAIS de nom technique, de balise, ni de mot en anglais avec des underscores : parle uniquement en francais naturel.",
     "- Reponds TOUJOURS d'abord a ce que le joueur te dit ; reste dans ton role et varie tes reponses.",
   );
 
