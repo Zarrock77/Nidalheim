@@ -23,8 +23,9 @@ export function buildSystemPrompt(npc: Npc, missions: ClientMission[]): string {
   }
 
   lines.push(
-    "Le joueur s'est vu confier la (les) mission(s) ci-dessous. Respecte la consigne de role de chaque mission (qui tu es, comment accueillir le joueur, et ce qu'il doit accomplir avant que tu l'autorises a poursuivre).",
-    "Missions (definies par le donjon ; etat tenu a jour par le client) :",
+    "Voici la (les) epreuve(s) que le joueur doit accomplir pour obtenir ce qu'il demande (par exemple entrer au village). Suis la consigne de role de chaque mission (qui tu es, comment accueillir le joueur, ce qu'il doit accomplir).",
+    "Tu n'as PAS encore confie ces epreuves : tu les PRESENTES comme des conditions a remplir, quand le joueur le demande. Ne pretends jamais les lui avoir deja donnees, confiees ou attribuees auparavant.",
+    "Epreuves (definies par le donjon ; etat tenu a jour par le client) :",
   );
 
   for (const m of missions) {
@@ -32,7 +33,7 @@ export function buildSystemPrompt(npc: Npc, missions: ClientMission[]): string {
       ? "ACCOMPLIE"
       : m.hasObjectiveItem
         ? "objet en sa possession — tu peux la valider"
-        : "en cours — le joueur n'a pas encore l'objet";
+        : "pas encore accomplie — le joueur n'a pas encore l'objet";
     lines.push(`- « ${m.name} » [${status}] : ${m.objectiveDescription}`);
     if (m.missionPrompt) {
       lines.push(`  Consigne de role : ${m.missionPrompt}`);

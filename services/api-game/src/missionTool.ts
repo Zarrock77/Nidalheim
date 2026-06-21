@@ -55,8 +55,9 @@ export function handleValidateMission(state: MissionState, argsJson: string): Va
   if (mission.hasObjectiveItem) {
     return {
       toolResult:
-        `VALIDE : le joueur possede bien l'item-objectif (${mission.objectiveItemId}) de la mission "${mission.name}". ` +
-        "Felicite-le chaleureusement, declare la mission accomplie et laisse-le entrer au village.",
+        `VALIDE : le joueur a bien en sa possession l'objet requis pour la mission "${mission.name}". ` +
+        "Tu PRENDS l'objet des mains du joueur et tu le dis a voix haute (par exemple « Je te prends ce lingot d'or »), " +
+        "puis tu le felicites brievement, declares la mission accomplie et le laisses entrer au village.",
       missionId: mission.id,
       ok: true,
     };
@@ -64,8 +65,8 @@ export function handleValidateMission(state: MissionState, argsJson: string): Va
 
   return {
     toolResult:
-      `NON VALIDE : le joueur ne possede PAS l'item-objectif (${mission.objectiveItemId}) de la mission "${mission.name}". ` +
-      "Dis-lui qu'il doit d'abord rapporter l'objet ; ne le felicite pas et ne le laisse pas entrer.",
+      `NON VALIDE : le joueur n'a PAS encore l'objet requis pour la mission "${mission.name}". ` +
+      "Dis-lui qu'il doit d'abord aller le recuperer et te le rapporter ; ne le felicite pas et ne le laisse pas entrer.",
     missionId: mission.id,
     ok: false,
   };
