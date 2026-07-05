@@ -52,7 +52,7 @@ export function handleValidateMission(state: MissionState, argsJson: string): Va
     };
   }
 
-  if (mission.hasObjectiveItem) {
+  if (mission.hasObjectiveItem || state.hasItem(mission.objectiveItemId)) {
     return {
       toolResult:
         `VALIDE : le joueur a bien en sa possession l'objet requis pour la mission "${mission.name}". ` +
@@ -69,5 +69,68 @@ export function handleValidateMission(state: MissionState, argsJson: string): Va
       "Dis-lui qu'il doit d'abord aller le recuperer et te le rapporter ; ne le felicite pas et ne le laisse pas entrer.",
     missionId: mission.id,
     ok: false,
+  };
+}
+
+export interface StartMissionOutcome {
+  /** Texte renvoye au LLM (resultat du tool). */
+  toolResult: string;
+  /** Mission concernee (null si aucune resolue). */
+  missionId: string | null;
+  /** true si la mission vient d'etre confiee (transition non-confiee -> confiee). */
+  started: boolean;
+}
+
+/**
+ * Logique partagee texte + vocal du tool `start_mission` : le PNJ confie une mission au joueur.
+ * Resolution tolerante (id, puis nom, puis premiere mission non confiee). Mute l'etat local
+ * (started=true) pour le gating du meme tour ; le client persiste et re-sync.
+ */
+export function handleStartMission(state: MissionState, argsJson: string): StartMissionOutcome {
+  let requestedId: string | undefined;
+  try {
+    const parsed = JSON.parse(argsJson || "{}") as { missionId?: unknown };
+    if (typeof parsed.missionId === "string" && parsed.missionId.trim()) {
+      requestedId = parsed.missionId.trim();
+    }
+  } catch {
+    /* args vides ou invalides -> premiere mission non confiee */
+  }
+
+  let mission = requestedId
+    ? state.find(requestedId) ?? state.all().find((m) => m.name.toLowerCase() === requestedId!.toLowerCase())
+    : undefined;
+  if (!mission) mission = state.all().find((m) => !m.completed && !m.started);
+  if (!mission) mission = state.active();
+
+  if (!mission) {
+    return {
+      toolResult: "Aucune mission a confier au joueur pour le moment. Converse normalement.",
+      missionId: requestedId ?? null,
+      started: false,
+    };
+  }
+  if (mission.completed) {
+    return {
+      toolResult: `La mission "${mission.name}" est deja accomplie : ne la confie pas a nouveau.`,
+      missionId: mission.id,
+      started: false,
+    };
+  }
+  if (mission.started) {
+    return {
+      toolResult: `La mission "${mission.name}" est deja confiee au joueur : n'en parle pas comme d'une nouveaute.`,
+      missionId: mission.id,
+      started: false,
+    };
+  }
+
+  mission.started = true;
+  return {
+    toolResult:
+      `C'est note : la mission "${mission.name}" est maintenant confiee au joueur. ` +
+      "Presente-lui brievement ce qu'il doit accomplir (1 a 2 phrases courtes).",
+    missionId: mission.id,
+    started: true,
   };
 }

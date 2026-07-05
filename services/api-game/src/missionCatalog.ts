@@ -27,3 +27,29 @@ export const MISSION_VALIDATE_TOOL: OpenAI.Chat.Completions.ChatCompletionTool =
     },
   },
 };
+
+/**
+ * Tool appele par le PNJ au moment PRECIS ou il confie une mission au joueur pour la premiere fois.
+ * Declenche l'event `mission_started` vers le client (HUD objectif visible, etat persiste dans l'IR).
+ */
+export const MISSION_START_TOOL: OpenAI.Chat.Completions.ChatCompletionTool = {
+  type: "function",
+  function: {
+    name: "start_mission",
+    description:
+      "A appeler au moment precis ou tu confies une epreuve/mission au joueur pour la premiere fois " +
+      "(quand tu lui presentes sa tache a accomplir et qu'il l'accepte implicitement). " +
+      "Ne l'appelle qu'une seule fois par mission ; jamais pour une mission deja confiee ou deja accomplie.",
+    parameters: {
+      type: "object",
+      properties: {
+        missionId: {
+          type: "string",
+          description:
+            "Identifiant de la mission confiee. Optionnel : par defaut, la premiere mission pas encore confiee.",
+        },
+      },
+      required: [],
+    },
+  },
+};

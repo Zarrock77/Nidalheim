@@ -10,9 +10,10 @@ import { HttpRouter, sendJson } from "./httpRouter.js";
 import { getNpc } from "./npcStore.js";
 import { ChatEngine } from "./providers/chatEngine.js";
 import { buildSystemPrompt } from "./systemPrompt.js";
-import { MISSION_VALIDATE_TOOL } from "./missionCatalog.js";
-import { handleValidateMission } from "./missionTool.js";
-import { acquireMissionState, releaseMissionState, parseMissionSync, type MissionState } from "./missionState.js";
+import { MISSION_VALIDATE_TOOL, MISSION_START_TOOL } from "./missionCatalog.js";
+import { handleValidateMission, handleStartMission } from "./missionTool.js";
+import { acquireMissionState, releaseMissionState, parseMissionSync, parseInventorySync, type MissionState } from "./missionState.js";
+import { generateDungeonExtension, type CatalogItem } from "./dungeonExpansion.js";
 import { QuestGenerator } from "./questGenerator.js";
 import { registerQuestRoutes } from "./questRoutes.js";
 import { QuestStore } from "./questStore.js";
@@ -23,6 +24,9 @@ config({ path: "../../infra/.env" });
 assertJwtSecretConfigured();
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
+// Generation d'extension en cours par joueur (une seule a la fois, l'appel LLM prend plusieurs secondes).
+const expansionInFlight = new Set<string>();
 
 function startHeartbeat(ws: WebSocket): void {
   let interval: NodeJS.Timeout;
@@ -64,7 +68,7 @@ async function handleTextConnection(
     if (!userText) return;
 
     // Messages de controle JSON du client (ex: mission_sync, clear_history) — ne passent jamais par le LLM.
-    if (userText.startsWith("{") && handleTextControlMessage(user, npc, missionState, store, userText)) {
+    if (userText.startsWith("{") && handleTextControlMessage(websocket, user, npc, missionState, store, userText)) {
       return;
     }
     console.log(`[text ${user.username}/${npc.id}] user: ${userText}`);
@@ -79,7 +83,7 @@ async function handleTextConnection(
 
     const missions = missionState.all();
     const messages = [
-      { role: "system" as const, content: buildSystemPrompt(npc, missions) },
+      { role: "system" as const, content: buildSystemPrompt(npc, missions, missionState.getInventory()) },
       ...history,
       { role: "user" as const, content: userText },
     ];
@@ -89,8 +93,19 @@ async function handleTextConnection(
       reply = await chatEngine.respond(messages, {
         // Tool expose UNIQUEMENT quand il peut servir : mission active + objet en main (cas ou la
         // validation peut reussir). Sinon aucun tool -> le prompt gere le dialogue (et zero fuite).
-        tools: missions.some((m) => !m.completed && m.hasObjectiveItem) ? [MISSION_VALIDATE_TOOL] : [],
+        tools: [
+          ...(missions.some((m) => !m.completed && !m.started) ? [MISSION_START_TOOL] : []),
+          ...(missions.some((m) => !m.completed && (m.hasObjectiveItem || missionState.hasItem(m.objectiveItemId))) ? [MISSION_VALIDATE_TOOL] : []),
+        ],
         onToolCall: async (name, argumentsJson) => {
+          if (name === "start_mission") {
+            const outcome = handleStartMission(missionState, argumentsJson);
+            if (outcome.started && websocket.readyState === WebSocket.OPEN) {
+              websocket.send(JSON.stringify({ type: "mission_started", missionId: outcome.missionId }));
+            }
+            console.log(`[text /] start_mission  -> started=`);
+            return outcome.toolResult;
+          }
           if (name === "validate_mission") {
             const outcome = handleValidateMission(missionState, argumentsJson);
             if (websocket.readyState === WebSocket.OPEN) {
@@ -133,6 +148,7 @@ async function handleTextConnection(
  * alors pas partir au LLM.
  */
 function handleTextControlMessage(
+  websocket: WebSocket,
   user: AuthenticatedUser,
   npc: Npc,
   missionState: MissionState,
@@ -151,6 +167,53 @@ function handleTextControlMessage(
     const missions = parseMissionSync(ctrl as { missions?: unknown });
     missionState.replaceAll(missions);
     console.log(`[text ${user.username}/${npc.id}] mission_sync -> ${missions.length} mission(s)`);
+    return true;
+  }
+
+  if (ctrl.type === "inventory_sync") {
+    // Fouille : le client pousse l'inventaire ENTIER du joueur (butin donjon + equipement).
+    const items = parseInventorySync(ctrl as { items?: unknown });
+    missionState.replaceInventory(items);
+    console.log(`[text ${user.username}/${npc.id}] inventory_sync -> ${items.length} item(s)`);
+    return true;
+  }
+
+  if (ctrl.type === "dungeon_expand") {
+    // Expansion LLM : le client envoie son plan complet + le catalogue d'items posables ; on genere
+    // l'extension en arriere-plan (plusieurs secondes) et on repond par un event dungeon_extension.
+    const payload = ctrl as { plan?: unknown; items?: unknown };
+    const items: CatalogItem[] = Array.isArray(payload.items)
+      ? payload.items
+          .filter((x): x is { id: string; name?: unknown } => !!x && typeof (x as { id?: unknown }).id === "string")
+          .map((x) => ({ id: x.id, name: typeof x.name === "string" ? x.name : x.id }))
+      : [];
+    if (expansionInFlight.has(user.id)) {
+      console.log(`[text ${user.username}/${npc.id}] dungeon_expand ignore (generation deja en cours)`);
+      return true;
+    }
+    expansionInFlight.add(user.id);
+    console.log(`[text ${user.username}/${npc.id}] dungeon_expand recu (${items.length} items au catalogue)`);
+    void (async () => {
+      try {
+        const result = await generateDungeonExtension(payload.plan, items);
+        if (websocket.readyState === WebSocket.OPEN) {
+          websocket.send(JSON.stringify({
+            type: "dungeon_extension",
+            ok: result.ok,
+            extension: result.extension ?? null,
+            error: result.error ?? "",
+          }));
+        }
+        console.log(`[text ${user.username}/${npc.id}] dungeon_extension -> ok=${result.ok}${result.error ? ` (${result.error})` : ""}`);
+      } catch (err) {
+        console.error(`[text ${user.username}/${npc.id}] dungeon_expand crash:`, (err as Error)?.message ?? err);
+        if (websocket.readyState === WebSocket.OPEN) {
+          websocket.send(JSON.stringify({ type: "dungeon_extension", ok: false, extension: null, error: "erreur interne" }));
+        }
+      } finally {
+        expansionInFlight.delete(user.id);
+      }
+    })();
     return true;
   }
 
