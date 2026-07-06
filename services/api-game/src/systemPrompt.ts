@@ -55,7 +55,7 @@ export function buildSystemPrompt(
         );
       } else {
         lines.push(
-          "  Presente-la comme une condition a remplir quand le joueur le demande. Au moment PRECIS ou tu la lui confies pour la premiere fois, declenche l'outil prevu pour confier une mission (une seule fois).",
+          "  PRESENTER CETTE EPREUVE = LA CONFIER : des que la conversation s'y prete (le joueur demande quoi faire, veut entrer au village, propose son aide, ou te questionne sur l'epreuve), appelle l'outil start_mission PUIS presente-la brievement. N'attends pas une acceptation explicite, et ne decris jamais l'epreuve sans avoir appele l'outil.",
         );
       }
     }

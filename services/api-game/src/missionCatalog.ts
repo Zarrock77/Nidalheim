@@ -37,8 +37,8 @@ export const MISSION_START_TOOL: OpenAI.Chat.Completions.ChatCompletionTool = {
   function: {
     name: "start_mission",
     description:
-      "A appeler au moment precis ou tu confies une epreuve/mission au joueur pour la premiere fois " +
-      "(quand tu lui presentes sa tache a accomplir et qu'il l'accepte implicitement). " +
+      "A appeler des que tu presentes une epreuve/mission au joueur pour la premiere fois : " +
+      "il demande quoi faire, veut entrer au village, propose son aide, ou la conversation y mene. Presenter = confier : appelle cet outil au meme tour, SANS attendre une acceptation explicite. " +
       "Ne l'appelle qu'une seule fois par mission ; jamais pour une mission deja confiee ou deja accomplie.",
     parameters: {
       type: "object",
