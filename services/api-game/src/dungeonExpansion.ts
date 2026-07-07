@@ -22,6 +22,29 @@ const ALLOWED_ROLES = new Set(["Junction", "Combat", "SetPiece", "Sanctuary", "O
 
 type AnyObj = Record<string, unknown>;
 
+// Les FName UE perdent leur casse d'origine selon l'ordre de chargement (client packate:
+// "id" devient "iD") -> on renormalise TOUTES les cles vers la casse canonique du schema.
+const CANONICAL_KEYS = [
+  "id", "role", "intent", "spatialSignature", "cellAssigned", "cell", "x", "y",
+  "from", "to", "gateLockId", "lockId", "nodeId", "guardian", "killed", "unlocked",
+  "faction", "budget", "name", "objectiveItemId", "objectiveItemName", "objectiveDescription",
+  "missionPrompt", "objectiveNodeId", "started", "completed", "itemId", "quantity", "offset",
+  "lorePrompt", "collected", "motif", "nodes", "links", "keys", "encounters", "missions", "secrets",
+];
+const CANON_BY_LOWER = new Map(CANONICAL_KEYS.map((k) => [k.toLowerCase(), k]));
+
+export function canonicalizeKeys(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(canonicalizeKeys);
+  if (v && typeof v === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      out[CANON_BY_LOWER.get(k.toLowerCase()) ?? k] = canonicalizeKeys(val);
+    }
+    return out;
+  }
+  return v;
+}
+
 function asArray(v: unknown): AnyObj[] {
   return Array.isArray(v) ? (v.filter((x) => x && typeof x === "object") as AnyObj[]) : [];
 }
@@ -171,7 +194,7 @@ function validateExtension(ext: AnyObj, plan: AnyObj, items: CatalogItem[], anch
 }
 
 export async function generateDungeonExtension(planRaw: unknown, items: CatalogItem[]): Promise<ExpansionResult> {
-  const plan = (planRaw && typeof planRaw === "object" ? planRaw : {}) as AnyObj;
+  const plan = canonicalizeKeys(planRaw && typeof planRaw === "object" ? planRaw : {}) as AnyObj;
   const anchors = computeAnchors(plan);
   if (anchors.length === 0) return { ok: false, error: "aucune ancre (aucun butin recupere)" };
   if (items.length === 0) return { ok: false, error: "catalogue d'items vide" };
@@ -214,7 +237,7 @@ export async function generateDungeonExtension(planRaw: unknown, items: CatalogI
         const text = res.choices[0]?.message?.content ?? "";
         let parsed: AnyObj;
         try {
-          parsed = JSON.parse(text) as AnyObj;
+          parsed = canonicalizeKeys(JSON.parse(text)) as AnyObj; // le modele mime la casse du plan recu
         } catch {
           lastError = `${p.label}: JSON illisible`;
           continue;

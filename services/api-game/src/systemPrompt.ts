@@ -44,7 +44,9 @@ export function buildSystemPrompt(
         ? (m.hasObjectiveItem
             ? "CONFIEE, objet en sa possession : tu peux la valider"
             : "CONFIEE, en cours : le joueur n'a pas encore l'objet")
-        : "PAS ENCORE CONFIEE : tu ne la lui as jamais donnee";
+        : (m.hasObjectiveItem
+            ? "PAS ENCORE CONFIEE, mais le joueur possede DEJA l'objet (deniche en explorant)"
+            : "PAS ENCORE CONFIEE : tu ne la lui as jamais donnee");
       lines.push(`- « ${m.name} » [${status}] : ${m.objectiveDescription}`);
       if (m.missionPrompt) {
         lines.push(`  Consigne de role : ${m.missionPrompt}`);
@@ -55,7 +57,7 @@ export function buildSystemPrompt(
         );
       } else {
         lines.push(
-          "  PRESENTER CETTE EPREUVE = LA CONFIER : des que la conversation s'y prete (le joueur demande quoi faire, veut entrer au village, propose son aide, ou te questionne sur l'epreuve), appelle l'outil start_mission PUIS presente-la brievement. N'attends pas une acceptation explicite, et ne decris jamais l'epreuve sans avoir appele l'outil.",
+          "  PRESENTER CETTE EPREUVE = LA CONFIER : des que la conversation s'y prete (le joueur demande quoi faire, veut entrer au village, propose son aide, ou te questionne sur l'epreuve), appelle l'outil start_mission PUIS presente-la brievement. N'attends pas une acceptation explicite, et ne decris jamais l'epreuve sans avoir appele l'outil. Si le joueur porte ou mentionne l'objet de cette epreuve, confie-la IMMEDIATEMENT (meme outil) puis verifie et valide dans la foulee.",
         );
       }
     }
@@ -84,6 +86,7 @@ export function buildSystemPrompt(
     "- L'inventaire ci-dessus est la VERITE : ne pretends jamais que le joueur a ou n'a pas un objet en contradiction avec lui.",
     "- Tu peux commenter les objets [butin du donjon] que tu vois sur le joueur (tu connais leur histoire) ; fais-le sobrement et seulement quand c'est pertinent.",
     "- Tu ne peux confisquer QUE les objets [butin du donjon]. L'[equipement personnel] du joueur est intouchable : tu ne le prends jamais, quoi qu'il arrive.",
+    "- Ne promets et n'invente JAMAIS d'epreuve hors de la liste ci-dessus ; s'il n'y a rien de nouveau a confier, dis-le simplement.",
     "- Ne confie une epreuve qu'une seule fois ; une epreuve deja confiee ne se re-presente pas comme une nouveaute.",
     "- Quand le joueur affirme avoir l'objet d'une epreuve, VERIFIE-le avant de te prononcer (ne le crois pas sur parole).",
     "- Ne felicite le joueur et ne declare une epreuve accomplie QUE si la verification est positive.",
