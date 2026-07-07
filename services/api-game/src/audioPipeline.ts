@@ -4,9 +4,13 @@ import path from "path";
 import { DeepgramStreamingSTT } from "./providers/deepgram.js";
 import { ElevenLabsStreamingTTS } from "./providers/elevenlabs.js";
 import { CartesiaStreamingTTS } from "./providers/cartesia.js";
-import { LLMStreaming } from "./providers/llm.js";
+import { ChatEngine } from "./providers/chatEngine.js";
+import { buildSystemPrompt } from "./systemPrompt.js";
 import { ConversationStore } from "./conversationStore.js";
-import type { AuthenticatedUser, Npc } from "./types.js";
+import { MISSION_VALIDATE_TOOL, MISSION_START_TOOL } from "./missionCatalog.js";
+import { handleValidateMission, handleStartMission } from "./missionTool.js";
+import { acquireMissionState, releaseMissionState, type MissionState } from "./missionState.js";
+import type { AuthenticatedUser, ChatMessage, Npc } from "./types.js";
 
 const KEEPALIVE_INTERVAL_MS = 8000;
 
@@ -78,9 +82,10 @@ export class AudioPipeline {
   private readonly npc: Npc;
   private readonly config: AudioPipelineConfig;
   private readonly stt: DeepgramStreamingSTT;
-  private readonly llm: LLMStreaming;
+  private readonly engine: ChatEngine;
   private readonly ttsRoute: TTSRoute;
   private readonly conversationStore: ConversationStore;
+  private readonly missionState: MissionState;
 
   private utteranceInFlight = false;
   private pendingTranscript = "";
@@ -101,13 +106,16 @@ export class AudioPipeline {
     this.npc = npc;
     this.config = config;
     this.stt = new DeepgramStreamingSTT(config.deepgramKey);
-    this.llm = new LLMStreaming(config.llmApiKey ?? config.openaiKey, {
-      systemPrompt: npc.systemPrompt,
-      model: config.llmModel,
-      baseURL: config.llmBaseUrl,
+    this.engine = new ChatEngine({
+      groqApiKey: config.llmApiKey,
+      groqBaseUrl: config.llmBaseUrl,
+      groqModel: config.llmModel,
+      openaiApiKey: config.openaiKey,
     });
     this.ttsRoute = makeTTS(config);
     this.conversationStore = new ConversationStore({ maxHistory: 20 });
+    // Etat des missions partage avec le canal texte du meme joueur (cf. missionState.ts).
+    this.missionState = acquireMissionState(user.id, npc.id);
   }
 
   async start(): Promise<void> {
@@ -141,23 +149,10 @@ export class AudioPipeline {
 
     this._sttOpened = false;
 
-    const hydrate = (async () => {
-      try {
-        const history = await this.conversationStore.loadRecent(this.user.id, this.npc.id);
-        if (history.length > 0) {
-          this.llm.setHistory(history);
-          console.log(`[pipeline ${this.user.username}/${this.npc.id}] restored ${history.length} past messages`);
-        }
-      } catch (err) {
-        console.error(`[pipeline ${this.user.username}/${this.npc.id}] conversation load failed:`, (err as Error)?.message ?? err);
-      }
-    })();
-
     if (this.ttsRoute.persistent) {
       await this.ttsRoute.instance.start();
       console.log(`[pipeline ${this.user.username}] tts (persistent) ready`);
     }
-    await hydrate;
 
     this.keepAliveTimer = setInterval(() => {
       if (!this.disposed) this.stt.keepAlive();
@@ -295,36 +290,75 @@ export class AudioPipeline {
 
     mark("llm call");
     let firstTokenAt: number | null = null;
-    await this.llm.streamResponse(userText, {
-      onDelta: (delta) => {
-        if (!firstTokenAt) {
-          firstTokenAt = Date.now();
-          mark("first LLM token");
-        }
-        if (ttsFailed) return;
-        if (ttsReady) {
-          tts.sendText(delta);
-        } else {
-          pendingDeltas.push(delta);
-        }
-      },
-      onComplete: (full) => {
-        mark("llm complete");
-        console.log(`[pipeline ${this.user.username}/${this.npc.id}] NPC reply: "${full}"`);
-        this._send({ type: "text", data: full });
-        ttsReadyPromise.then((ok) => {
-          if (!ok) return;
-          tts.flush();
-        });
-        this.conversationStore
-          .appendTurn(this.user.id, this.npc.id, userText, full, "audio")
-          .catch((err) => console.error(`[pipeline ${this.user.username}/${this.npc.id}] history save failed:`, (err as Error)?.message ?? err));
-      },
-      onError: (err) => {
-        this._send({ type: "error", message: `llm: ${(err as Error)?.message ?? err}` });
-        if (needCloseOnDone) tts.close();
-      },
-    });
+
+    // Recharge l'historique partage a chaque tour -> sync live vocal<->texte.
+    let history: ChatMessage[] = [];
+    try {
+      history = await this.conversationStore.loadRecent(this.user.id, this.npc.id);
+    } catch (err) {
+      console.error(`[pipeline ${this.user.username}/${this.npc.id}] history load failed:`, (err as Error)?.message ?? err);
+    }
+    const missions = this.missionState.all();
+    const messages = [
+      { role: "system" as const, content: buildSystemPrompt(this.npc, missions, this.missionState.getInventory()) },
+      ...history,
+      { role: "user" as const, content: userText },
+    ];
+
+    try {
+      const full = await this.engine.respond(messages, {
+        stream: true,
+        // Tool expose UNIQUEMENT quand il peut servir : mission active + objet en main (cas ou la
+        // validation peut reussir). Sinon aucun tool -> le prompt gere le dialogue (et zero fuite).
+        tools: [
+          ...(missions.some((m) => !m.completed && !m.started) ? [MISSION_START_TOOL] : []),
+          ...(missions.some((m) => !m.completed && (m.hasObjectiveItem || this.missionState.hasItem(m.objectiveItemId))) ? [MISSION_VALIDATE_TOOL] : []),
+        ],
+        onToolCall: async (name, argumentsJson) => {
+          if (name === "start_mission") {
+            const outcome = handleStartMission(this.missionState, argumentsJson);
+            if (outcome.started) {
+              this._send({ type: "mission_started", missionId: outcome.missionId });
+            }
+            console.log(`[pipeline /] start_mission  -> started=`);
+            return outcome.toolResult;
+          }
+          if (name === "validate_mission") {
+            const outcome = handleValidateMission(this.missionState, argumentsJson);
+            this._send({ type: "mission_validation_result", missionId: outcome.missionId, ok: outcome.ok });
+            console.log(`[pipeline ${this.user.username}/${this.npc.id}] validate_mission ${outcome.missionId ?? "-"} -> ok=${outcome.ok}`);
+            return outcome.toolResult;
+          }
+          return `tool inconnu: ${name}`;
+        },
+        onDelta: (delta) => {
+          if (!firstTokenAt) {
+            firstTokenAt = Date.now();
+            mark("first LLM token");
+          }
+          if (ttsFailed) return;
+          if (ttsReady) {
+            tts.sendText(delta);
+          } else {
+            pendingDeltas.push(delta);
+          }
+        },
+      });
+
+      mark("llm complete");
+      console.log(`[pipeline ${this.user.username}/${this.npc.id}] NPC reply: "${full}"`);
+      this._send({ type: "text", data: full });
+      ttsReadyPromise.then((ok) => {
+        if (!ok) return;
+        tts.flush();
+      });
+      this.conversationStore
+        .appendTurn(this.user.id, this.npc.id, userText, full, "audio")
+        .catch((err) => console.error(`[pipeline ${this.user.username}/${this.npc.id}] history save failed:`, (err as Error)?.message ?? err));
+    } catch (err) {
+      this._send({ type: "error", message: `llm: ${(err as Error)?.message ?? err}` });
+      if (needCloseOnDone) tts.close();
+    }
 
     this.utteranceInFlight = false;
   }
@@ -337,6 +371,7 @@ export class AudioPipeline {
   shutdown(): void {
     if (this.disposed) return;
     this.disposed = true;
+    releaseMissionState(this.user.id, this.npc.id);
     if (this.keepAliveTimer) {
       clearInterval(this.keepAliveTimer);
       this.keepAliveTimer = null;

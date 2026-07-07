@@ -1,5 +1,4 @@
 import WebSocket, { WebSocketServer } from "ws";
-import OpenAI from "openai";
 import http from "http";
 import { config } from "dotenv";
 import type { IncomingMessage } from "http";
@@ -9,6 +8,12 @@ import { assertJwtSecretConfigured, userFromJwtPayload, verifyToken } from "./au
 import { ConversationStore } from "./conversationStore.js";
 import { HttpRouter, sendJson } from "./httpRouter.js";
 import { getNpc } from "./npcStore.js";
+import { ChatEngine } from "./providers/chatEngine.js";
+import { buildSystemPrompt } from "./systemPrompt.js";
+import { MISSION_VALIDATE_TOOL, MISSION_START_TOOL } from "./missionCatalog.js";
+import { handleValidateMission, handleStartMission } from "./missionTool.js";
+import { acquireMissionState, releaseMissionState, parseMissionSync, parseInventorySync, type MissionState } from "./missionState.js";
+import { generateDungeonExtension, type CatalogItem } from "./dungeonExpansion.js";
 import { QuestGenerator } from "./questGenerator.js";
 import { registerQuestRoutes } from "./questRoutes.js";
 import { QuestStore } from "./questStore.js";
@@ -19,6 +24,9 @@ config({ path: "../../infra/.env" });
 assertJwtSecretConfigured();
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
+// Generation d'extension en cours par joueur (une seule a la fois, l'appel LLM prend plusieurs secondes).
+const expansionInFlight = new Set<string>();
 
 function startHeartbeat(ws: WebSocket): void {
   let interval: NodeJS.Timeout;
@@ -33,75 +41,90 @@ function startHeartbeat(ws: WebSocket): void {
   }, 30000);
 }
 
-interface TextConnectionDeps {
-  questGenerator: QuestGenerator;
-  questStore: QuestStore;
-}
-
-const textChatClient = new OpenAI({
-  apiKey: process.env.LLM_API_KEY || OPENAI_API_KEY,
-  baseURL: process.env.LLM_BASE_URL || undefined,
+// Moteur de chat unifie texte + vocal : Groq en primaire, OpenAI en fallback.
+// Modele dedie au chat (function-calling fiable) — distinct du LLM_MODEL du generateur de quetes.
+const chatEngine = new ChatEngine({
+  groqApiKey: process.env.LLM_API_KEY,
+  groqBaseUrl: process.env.LLM_BASE_URL,
+  groqModel: process.env.CHAT_LLM_MODEL || "llama-3.3-70b-versatile",
+  openaiApiKey: OPENAI_API_KEY,
+  openaiModel: process.env.OPENAI_FALLBACK_MODEL || "gpt-4o-mini",
 });
-const textChatModel = process.env.LLM_MODEL || "llama-3.1-8b-instant";
 
 async function handleTextConnection(
   websocket: WebSocket,
   user: AuthenticatedUser,
   npc: Npc,
-  deps: TextConnectionDeps,
 ): Promise<void> {
   console.log(`Client connected to text endpoint (user: ${user.username}, npc: ${npc.id})`);
   startHeartbeat(websocket);
 
   const store = new ConversationStore({ maxHistory: 20 });
-  let history: ChatMessage[] = [];
-  try {
-    history = await store.loadRecent(user.id, npc.id);
-    if (history.length > 0) {
-      console.log(`[text ${user.username}/${npc.id}] restored ${history.length} past messages`);
-    }
-  } catch (err) {
-    console.error(`[text ${user.username}/${npc.id}] history load failed:`, (err as Error)?.message ?? err);
-  }
-
-  const model = npc.llmModel || textChatModel;
+  // Etat des missions partage avec le canal vocal du meme joueur (cf. missionState.ts).
+  const missionState = acquireMissionState(user.id, npc.id);
 
   websocket.on("message", async (message) => {
     const userText = message.toString().trim();
     if (!userText) return;
+
+    // Messages de controle JSON du client (ex: mission_sync, clear_history) — ne passent jamais par le LLM.
+    if (userText.startsWith("{") && handleTextControlMessage(websocket, user, npc, missionState, store, userText)) {
+      return;
+    }
     console.log(`[text ${user.username}/${npc.id}] user: ${userText}`);
 
-    history.push({ role: "user", content: userText });
+    // Recharge l'historique partage a CHAQUE tour -> sync live vocal<->texte.
+    let history: ChatMessage[] = [];
+    try {
+      history = await store.loadRecent(user.id, npc.id);
+    } catch (err) {
+      console.error(`[text ${user.username}/${npc.id}] history load failed:`, (err as Error)?.message ?? err);
+    }
+
+    const missions = missionState.all();
     const messages = [
-      { role: "system" as const, content: withQuestChatPolicy(npc.systemPrompt) },
+      { role: "system" as const, content: buildSystemPrompt(npc, missions, missionState.getInventory()) },
       ...history,
+      { role: "user" as const, content: userText },
     ];
 
     let reply: string;
     try {
-      const response = await textChatClient.chat.completions.create({
-        model,
-        messages,
+      reply = await chatEngine.respond(messages, {
+        // Tool expose UNIQUEMENT quand il peut servir : mission active + objet en main (cas ou la
+        // validation peut reussir). Sinon aucun tool -> le prompt gere le dialogue (et zero fuite).
+        tools: [
+          ...(missions.some((m) => !m.completed && !m.started) ? [MISSION_START_TOOL] : []),
+          ...(missions.some((m) => !m.completed && (m.hasObjectiveItem || missionState.hasItem(m.objectiveItemId))) ? [MISSION_VALIDATE_TOOL] : []),
+        ],
+        onToolCall: async (name, argumentsJson) => {
+          if (name === "start_mission") {
+            const outcome = handleStartMission(missionState, argumentsJson);
+            if (outcome.started && websocket.readyState === WebSocket.OPEN) {
+              websocket.send(JSON.stringify({ type: "mission_started", missionId: outcome.missionId }));
+            }
+            console.log(`[text /] start_mission  -> started=`);
+            return outcome.toolResult;
+          }
+          if (name === "validate_mission") {
+            const outcome = handleValidateMission(missionState, argumentsJson);
+            if (websocket.readyState === WebSocket.OPEN) {
+              websocket.send(JSON.stringify({ type: "mission_validation_result", missionId: outcome.missionId, ok: outcome.ok }));
+            }
+            console.log(`[text ${user.username}/${npc.id}] validate_mission ${outcome.missionId ?? "-"} -> ok=${outcome.ok}`);
+            return outcome.toolResult;
+          }
+          return `tool inconnu: ${name}`;
+        },
       });
-      reply = response.choices[0]?.message?.content ?? "";
     } catch (err) {
       console.error(`[text ${user.username}/${npc.id}] LLM error:`, (err as Error)?.message ?? err);
       websocket.send("Error generating response.");
-      history.pop();
       return;
     }
 
-    history.push({ role: "assistant", content: reply });
-    if (history.length > 40) history.splice(0, history.length - 40);
-
     console.log(`[text ${user.username}/${npc.id}] npc: ${reply}`);
     websocket.send(reply);
-
-    if (shouldOfferQuest(userText, reply)) {
-      void offerQuestFromText(websocket, user, npc, deps, userText, reply).catch((err) => {
-        console.error(`[text ${user.username}/${npc.id}] quest offer failed:`, (err as Error)?.message ?? err);
-      });
-    }
 
     store
       .appendTurn(user.id, npc.id, userText, reply, "text")
@@ -109,6 +132,7 @@ async function handleTextConnection(
   });
 
   websocket.on("close", () => {
+    releaseMissionState(user.id, npc.id);
     console.log(`Client disconnected from text endpoint (user: ${user.username}, npc: ${npc.id})`);
   });
 
@@ -117,58 +141,94 @@ async function handleTextConnection(
   });
 }
 
-function withQuestChatPolicy(systemPrompt: string): string {
-  return [
-    systemPrompt,
-    "",
-    "Regle quetes MVP:",
-    "- Si proposer ou imposer une quete est coherent avec la conversation, fais-le naturellement dans ta reponse.",
-    "- Pour ce MVP, ne propose que des quetes de collecte: ramasser, rapporter, trouver ou recolter des objets.",
-    "- Ne decris pas de quete de combat, d'assassinat, d'escorte, de voyage obligatoire ou d'utilisation de competence.",
-    "- N'ecris jamais de JSON ou de balise technique dans le chat joueur.",
-  ].join("\n");
-}
-
-function shouldOfferQuest(userText: string, npcReply: string): boolean {
-  const user = normalizeForIntent(userText);
-  const reply = normalizeForIntent(npcReply);
-  const userAskedForQuest = /\b(quete|quest|mission|travail|service|aide)\b/i.test(user);
-  const npcProposedCollect =
-    /\b(ramasse|ramasser|rapporte|rapporter|apporte|apporter|collecte|collecter|recolte|recolter|rassemble|rassembler|trouve|trouver)\b/i.test(reply)
-    && /\b(bois|pierre|pierres|pomme|pommes|herbe|plante|minerai|fer|fragment|relique|rune|objet|materiau|ressource)\b/i.test(reply);
-
-  return userAskedForQuest || npcProposedCollect;
-}
-
-function normalizeForIntent(value: string): string {
-  return value
-    .normalize("NFD")
-    .replace(/\p{Diacritic}/gu, "")
-    .toLowerCase();
-}
-
-async function offerQuestFromText(
+/**
+ * Traite un message de controle JSON envoye par le client sur le canal texte.
+ * `mission_sync` : le client (IR du donjon) pousse la liste des missions + leur etat
+ * (objectif possede, terminee). Retourne true si le message a ete consomme — il ne doit
+ * alors pas partir au LLM.
+ */
+function handleTextControlMessage(
   websocket: WebSocket,
   user: AuthenticatedUser,
   npc: Npc,
-  deps: TextConnectionDeps,
-  userText: string,
-  npcReply: string,
-): Promise<void> {
-  const quest = await deps.questGenerator.generateStructuredQuest({
-    user,
-    issuerNpcId: npc.id,
-    context: {
-      location: npc.id,
-      recentEvents: [userText, npcReply],
-    },
-  });
-
-  await deps.questStore.createOffered(user.id, quest, npc.id);
-
-  if (websocket.readyState === WebSocket.OPEN) {
-    websocket.send(JSON.stringify({ type: "quest_offer", payload: quest }));
+  missionState: MissionState,
+  store: ConversationStore,
+  raw: string,
+): boolean {
+  let ctrl: { type?: unknown; missions?: unknown };
+  try {
+    ctrl = JSON.parse(raw) as { type?: unknown; missions?: unknown };
+  } catch {
+    return false; // pas du JSON valide -> message de chat normal
   }
+  if (typeof ctrl.type !== "string") return false;
+
+  if (ctrl.type === "mission_sync") {
+    const missions = parseMissionSync(ctrl as { missions?: unknown });
+    missionState.replaceAll(missions);
+    console.log(`[text ${user.username}/${npc.id}] mission_sync -> ${missions.length} mission(s)`);
+    return true;
+  }
+
+  if (ctrl.type === "inventory_sync") {
+    // Fouille : le client pousse l'inventaire ENTIER du joueur (butin donjon + equipement).
+    const items = parseInventorySync(ctrl as { items?: unknown });
+    missionState.replaceInventory(items);
+    console.log(`[text ${user.username}/${npc.id}] inventory_sync -> ${items.length} item(s)`);
+    return true;
+  }
+
+  if (ctrl.type === "dungeon_expand") {
+    // Expansion LLM : le client envoie son plan complet + le catalogue d'items posables ; on genere
+    // l'extension en arriere-plan (plusieurs secondes) et on repond par un event dungeon_extension.
+    const payload = ctrl as { plan?: unknown; items?: unknown };
+    const items: CatalogItem[] = Array.isArray(payload.items)
+      ? payload.items
+          .filter((x): x is { id: string; name?: unknown } => !!x && typeof (x as { id?: unknown }).id === "string")
+          .map((x) => ({ id: x.id, name: typeof x.name === "string" ? x.name : x.id }))
+      : [];
+    if (expansionInFlight.has(user.id)) {
+      console.log(`[text ${user.username}/${npc.id}] dungeon_expand ignore (generation deja en cours)`);
+      return true;
+    }
+    expansionInFlight.add(user.id);
+    console.log(`[text ${user.username}/${npc.id}] dungeon_expand recu (${items.length} items au catalogue)`);
+    void (async () => {
+      try {
+        const result = await generateDungeonExtension(payload.plan, items);
+        if (websocket.readyState === WebSocket.OPEN) {
+          websocket.send(JSON.stringify({
+            type: "dungeon_extension",
+            ok: result.ok,
+            extension: result.extension ?? null,
+            error: result.error ?? "",
+          }));
+        }
+        console.log(`[text ${user.username}/${npc.id}] dungeon_extension -> ok=${result.ok}${result.error ? ` (${result.error})` : ""}`);
+      } catch (err) {
+        console.error(`[text ${user.username}/${npc.id}] dungeon_expand crash:`, (err as Error)?.message ?? err);
+        if (websocket.readyState === WebSocket.OPEN) {
+          websocket.send(JSON.stringify({ type: "dungeon_extension", ok: false, extension: null, error: "erreur interne" }));
+        }
+      } finally {
+        expansionInFlight.delete(user.id);
+      }
+    })();
+    return true;
+  }
+
+  if (ctrl.type === "clear_history") {
+    // Reset du jeu : le client demande l'effacement de tout l'historique de chat du joueur.
+    store
+      .clearHistory(user.id)
+      .then(() => console.log(`[text ${user.username}/${npc.id}] clear_history -> historique efface`))
+      .catch((err) => console.error(`[text ${user.username}/${npc.id}] clear_history failed:`, (err as Error)?.message ?? err));
+    return true;
+  }
+
+  // JSON avec un champ type inconnu : controle mal forme, on ne le donne jamais au LLM.
+  console.warn(`[text ${user.username}/${npc.id}] message de controle inconnu ignore: ${ctrl.type}`);
+  return true;
 }
 
 function handleAudioConnection(clientWs: WebSocket, user: AuthenticatedUser, npc: Npc): void {
@@ -189,7 +249,7 @@ function handleAudioConnection(clientWs: WebSocket, user: AuthenticatedUser, npc
 
     openaiKey: OPENAI_API_KEY,
     llmApiKey: process.env.LLM_API_KEY || process.env.GROQ_API_KEY,
-    llmModel: npc.llmModel || process.env.LLM_MODEL || "llama-3.3-70b-versatile",
+    llmModel: process.env.CHAT_LLM_MODEL || "llama-3.3-70b-versatile",
     llmBaseUrl: process.env.LLM_BASE_URL || "https://api.groq.com/openai/v1",
   });
 
@@ -314,7 +374,7 @@ function main(): void {
 
     if (path === "/text") {
       wss.handleUpgrade(request, socket, head, (ws) => {
-        void handleTextConnection(ws, user, npc, { questGenerator, questStore });
+        void handleTextConnection(ws, user, npc);
       });
     } else if (path === "/audio") {
       wss.handleUpgrade(request, socket, head, (ws) => {
