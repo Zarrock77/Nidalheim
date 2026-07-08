@@ -9,7 +9,7 @@ export default {
   survival: "Système de survie",
   talents: "Arbre de talents",
   "ai-enemy": "IA ennemie & Behavior Tree",
-  quests: "Quêtes",
+  quests: "Donjon & missions",
   hud: "HUD & widgets",
   chat: "Chat & UI",
   persistence: "Persistance & systèmes de jeu",

@@ -110,7 +110,9 @@ Détails dans [Voice pipeline](/docs/backend/voice-pipeline) côté backend. Cô
 1. **Capture** : la capture push-to-talk passe par **miniaudio** (header vendored `ThirdParty/miniaudio/`, WASAPI), qui ouvre un device au sample rate système avec une latence bien moindre que l'ancien `UAudioCaptureComponent`
 2. **Streaming** : envoi binaire frames PCM au WebSocket `/audio` (le client envoie un `audio_config` au début pour signaler le sample rate)
 3. **Commit** : `CommitAudioBuffer()` envoie un message texte `COMMIT` qui finalise l'utterance côté Deepgram
-4. **Playback** : les frames PCM TTS reçues sont écrites dans un `USoundWaveProcedural` lu par un `UAudioComponent`
+4. **Playback** : les frames PCM TTS reçues (24 kHz mono) sont écrites dans un ring buffer miniaudio (`ma_pcm_rb`) lu par un device de playback miniaudio — la lecture ne passe pas par l'AudioMixer UE
+
+La capture ET le playback sont donc entièrement gérés par **miniaudio** (latence 150–400 ms évitée vs `UAudioCaptureComponent` + AudioMixer/USynthComponent).
 
 > ⚠️ **Refactor récent** : `UNidalheimAudioCaptureComponent` (et le module `AudioCapture`) ont été **supprimés** — la capture est désormais gérée par **miniaudio** (latence 150–400 ms évitée vs AudioMixer + USynthComponent).
 
@@ -156,12 +158,29 @@ EndPlay
   → Close WebSockets
 ```
 
+## Events serveur & synchronisation missions
+
+Sur le canal texte, le PNJ distingue une réplique (texte brut) d'un **event JSON** (message commençant par `{`) — un event n'est jamais affiché dans le chat. Events gérés (`TryHandleServerEvent`, aussi traités sur le canal audio) :
+
+| Event | Effet client |
+|---|---|
+| `mission_started` | `QuestSubsystem->MarkMissionStarted` → HUD objectifs visible, état persisté |
+| `mission_validation_result` | `MarkMissionCompleted` + consommation de l'objet + demande d'expansion (`dungeon_expand`) |
+| `dungeon_extension` | fusion/validation du plan étendu (`ApplyExtensionInWorld`) → le donjon s'étend en place |
+| `user_transcript` / `user_transcript_partial` | transcription affichée dans le chat |
+| `audio` | chunk PCM TTS → ring buffer de playback |
+
+Dans l'autre sens, le PNJ pousse au backend : `mission_sync` (état des missions, à la connexion et à chaque `OnMissionsChanged`), `inventory_sync` (inventaire entier, à chaque changement), `dungeon_expand` (après une validation), `clear_history` (reset). Détails du flux : [Donjon & missions](/docs/unreal-engine/quests).
+
 ## Reconnect logic
 
-En cas de disconnect côté serveur ou erreur réseau, `OnTextClosed`/`OnAudioClosed` appellent `RequestReconnect(bTextChannel)` qui retente une fois (`bTextReconnectAttempted` / `bAudioReconnectAttempted` flags). Si la reconnexion échoue, le PNJ reste muet jusqu'au prochain `BeginPlay`.
+- **Canal texte** : reconnexion **toutes les 500 ms** tant que la socket n'est pas rétablie (`ScheduleTextReconnect`). Les messages **techniques** (syncs, `dungeon_expand`, `clear_history`) émis pendant une coupure sont mis en file et partent à la reconnexion (`FlushPendingTextSends`). Les **messages de chat du joueur ne sont jamais mis en file** : envoyés hors connexion, ils sont perdus (le joueur réessaie) — un texte rejoué en différé produirait une réponse hors contexte.
+- **Canal audio** : une reconnexion est retentée une fois (`bAudioReconnectAttempted`) après une fermeture serveur.
+- À chaque reconnexion texte : `mission_sync` + `inventory_sync` complets, et reprise d'une extension de donjon manquante (`TryResumeDungeonExpand`).
 
 ## Voir aussi
 
+- [Donjon & missions](/docs/unreal-engine/quests) — l'IR du donjon et le flux missions complet
 - [Authentification UE5](/docs/unreal-engine/auth) — `EnsureFreshAccessToken` est utilisé avant chaque ouverture de WS
 - [Chat & UI](/docs/unreal-engine/chat) — `ChatSubsystem` orchestre le NPCCharacter + ChatWidget
 - [Voice pipeline](/docs/backend/voice-pipeline) — backend STT → LLM → TTS

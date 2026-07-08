@@ -4,78 +4,74 @@ title: api-game
 
 # api-game
 
-Service WebSocket temps-réel pour les PNJ IA. JavaScript ESM + pnpm.
-Écoute sur le port **3002**.
+Service WebSocket temps-réel pour les PNJ IA (dialogue, missions du donjon, expansion LLM). TypeScript ESM + pnpm.
+Écoute sur le port **3002** (prod ; staging : 3012 via `start-staging.sh`).
 
 ## Deux endpoints
 
-Les deux acceptent un JWT via query param : `ws://api-game/<endpoint>?token=<accessToken>`.
+Les deux acceptent un JWT via query param : `ws://api-game/<endpoint>?token=<accessToken>&npc=<npcId>`.
 L'auth échoue (destroy socket) si :
 - le token est manquant
 - le JWT ne vérifie pas avec `JWT_SECRET` (HS256)
 
-### `/text` — chat LLM simple
+Le paramètre `npc` sélectionne le PNJ (table `npcs` : `system_prompt`, `voice_id`, `llm_model`) ; fallback sur `default`.
 
-Echange texte ↔ texte. Adapté pour des dialogues PNJ rapides sans audio.
+### `/text` — chat + messages de contrôle
 
-**Client → Server** : texte brut (UTF-8), une utterance par frame.
+**Client → Server** : texte brut (une réplique par frame), **ou** un message de contrôle JSON (commence par `{`) qui ne passe jamais par le LLM :
 
-**Server → Client** : texte brut (UTF-8), la réponse complète du LLM.
+| Message | Rôle |
+|---|---|
+| `{"type":"mission_sync","missions":[...]}` | état des missions défini par le client (IR du donjon) |
+| `{"type":"inventory_sync","items":[...]}` | inventaire entier du joueur (fouille du PNJ) |
+| `{"type":"dungeon_expand","plan":{...},"items":[...]}` | demande d'extension du donjon (asynchrone) |
+| `{"type":"clear_history"}` | vide l'historique `chat_messages` du couple (user, npc) |
 
-**Modèle LLM** : Groq Llama 3.1 8B par défaut (override via `LLM_MODEL`).
+**Server → Client** : texte brut (réplique du PNJ), **ou** un event JSON :
 
-**Historique** : les 20 derniers tours sont chargés depuis la table `chat_messages` au début de la session et injectés dans les `messages` envoyés au LLM. Chaque tour complet (user + assistant) est persisté en transaction.
+| Event | Rôle |
+|---|---|
+| `{"type":"mission_started","missionId":...}` | épreuve confiée (règle déterministe) |
+| `{"type":"mission_validation_result","missionId":...,"ok":true}` | épreuve validée |
+| `{"type":"dungeon_extension","ok":true,"extension":{...}}` | extension générée (ou `ok:false` + `error`) |
 
 ### `/audio` — voice chat streaming
 
-Pipeline `STT → LLM → TTS` streaming bout-en-bout. Latency target : **first audio chunk < 1s** après fin d'élocution.
+Pipeline `STT → LLM → TTS` streaming bout-en-bout (voir **[Voice pipeline](/docs/backend/voice-pipeline)**). Latency target : **first audio chunk < 1s** après fin d'élocution. Les messages de contrôle missions sont acceptés sur les deux canaux ; l'état est **partagé** (registre par couple user+npc, `missionState.ts`).
 
-**Client → Server** (JSON ou binaire) :
-- JSON `{ type: "audio_config", sample_rate: 48000, device: "...", bluetooth_hfp: false }`
-  → première frame obligatoire, permet à Deepgram d'être ouvert au bon sample rate dès le premier chunk PCM
-- PCM 16-bit LE base64 — une trame par chunk audio
-- `"COMMIT"` → force la finalisation de l'utterance courante (bouton relâché, push-to-talk)
+## Le moteur de chat — `providers/chatEngine.ts`
 
-**Server → Client** (JSON) :
-- `{ type: "user_transcript_partial", data: "bonj..." }` — transcript interim Deepgram
-- `{ type: "user_transcript", data: "bonjour" }` — transcript final
-- `{ type: "text", data: "<NPC reply>" }` — réponse complète du LLM
-- `{ type: "audio", data: "<base64-pcm>" }` — chunks audio TTS streaming
-- `{ type: "error", message: "..." }` — erreur d'un composant du pipeline
+Moteur unifié texte + vocal :
 
-## Pipeline voice en détail
+- **Providers** : **OpenAI en primaire** (`gpt-5.4-mini` par défaut), **Groq en secours** (`llama-3.3-70b-versatile` ; le `llm_model` par PNJ ne s'applique qu'à ce secours). Bascule automatique sur erreur — sauf en plein stream (éviter un doublon TTS).
+- **Déterminisme** : tous les appels à `temperature: 0` + `seed` fixe — mêmes entrées → mêmes sorties (fiabilité démo).
+- **Aucun tool exposé** : les décisions de gameplay sont prises par le code (voir ci-dessous), le texte du LLM ne peut donc pas fuiter de nom d'outil.
+- Garde anti-réponse-vide : une réponse vide est relancée une fois avec consigne explicite.
 
-Voir **[Voice pipeline](/docs/backend/voice-pipeline)** pour le détail complet.
+## Missions — règles déterministes
 
-Résumé du flow :
+`missionTool.ts` : `applyDeterministicMissionActions(state)` est évaluée par le **code** à chaque message du joueur (texte et vocal) :
 
-```
-client PCM ──▶ Deepgram WS (STT) ──▶ LLM stream (Groq/Llama) ──▶ TTS stream (Cartesia) ──▶ client PCM
-```
+1. épreuve **confiée** + objet présent dans l'inventaire synchronisé → **validée** (event `mission_validation_result`) ;
+2. épreuve **pas encore confiée** → **confiée** (event `mission_started`).
+
+Des **notes système** sont injectées dans le prompt du tour pour que le PNJ annonce l'événement. Le prompt (`systemPrompt.ts`) superpose : personnalité de base (`npcs.system_prompt`), missions + état, inventaire fouillé (avec lore des butins, règle de confiscation), règles de style.
+
+Harnais E2E : `scripts/e2e-missions.mjs` (JWT forgé + WS réel) rejoue les scénarios critiques — intégration → mission confiée, objet rapporté → validation, secret mentionné → mission suivante, plus de mission → aucun event parasite.
+
+## Expansion du donjon — `dungeonExpansion.ts`
+
+Sur `dungeon_expand` : ancres = salles pillées (missions accomplies, secrets ramassés) ; le LLM génère 2-3 salles derrière une ancre + porte verrouillée/clé + **une** nouvelle mission + secrets, en JSON strict (`response_format: json_object`, température 0). Validation de forme stricte ; en cas de rejet l'erreur est **renvoyée au modèle** pour correction (3 essais par provider, attente sur rate-limit 429). Le client re-valide le plan fusionné avant application.
+
+Les clés du plan reçu sont **canonicalisées sans casse** (`canonicalizeKeys`) : `FJsonObjectConverter` (UE) peut émettre `"iD"` en build packagée, toute lecture du JSON UE côté service est donc insensible à la casse.
 
 ## Historique persistant
 
-Les deux endpoints (`/text` et `/audio`) partagent la même table `chat_messages` via `ConversationStore`. Un utilisateur qui bascule entre voice et text retrouve son historique.
-
-**Schéma** (géré par Drizzle, voir [`services/db`](/docs/backend/services/database#chat_messages)) :
-
-```sql
-CREATE TABLE chat_messages (
-  id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id    uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  role       varchar(20) NOT NULL,   -- 'user' | 'assistant'
-  content    text NOT NULL,
-  channel    varchar(20),            -- 'text' | 'audio'
-  created_at timestamp NOT NULL DEFAULT now()
-);
-CREATE INDEX idx_chat_messages_user_created ON chat_messages(user_id, created_at);
-```
-
-Insertion : les tours user + assistant sont insérés **en transaction** pour éviter un état désynchronisé si le process crash entre les deux.
+Les deux endpoints partagent la table `chat_messages` via `ConversationStore` (20 derniers tours rechargés **à chaque tour** → sync live voix/texte). Tours user + assistant insérés en transaction.
 
 ## Heartbeat
 
-`ws.ping()` toutes les **30s** tant que la socket est `OPEN`. Pas de message applicatif — le heartbeat sert juste à keep-alive pour les proxys (nginx `proxy_read_timeout 86400s`).
+`ws.ping()` toutes les **30s** tant que la socket est `OPEN` (keep-alive proxys, nginx `proxy_read_timeout 86400s`).
 
 ## Variables d'env
 
@@ -83,29 +79,40 @@ Insertion : les tours user + assistant sont insérés **en transaction** pour é
 |----------|------|
 | `PORT` | Port d'écoute (default `3002`) |
 | `JWT_SECRET` | Secret HS256 partagé avec `api-auth` |
-| `DATABASE_URL` | Postgres pour `chat_messages` |
-| `DEEPGRAM_API_KEY` | STT |
-| `LLM_API_KEY` | Clé Groq (fallback `GROQ_API_KEY`) |
+| `DATABASE_URL` | Postgres (`chat_messages`, `npcs`, quêtes REST) |
+| `OPENAI_API_KEY` | **LLM primaire** (chat + expansion) |
+| `OPENAI_FALLBACK_MODEL` | Modèle OpenAI (default `gpt-5.4-mini`) |
+| `LLM_API_KEY` | Clé Groq — LLM de **secours** (fallback `GROQ_API_KEY`) |
 | `LLM_BASE_URL` | Default `https://api.groq.com/openai/v1` |
-| `LLM_MODEL` | Default `llama-3.1-8b-instant` (`/text`) ou `llama-3.3-70b-versatile` (`/audio`) |
+| `CHAT_LLM_MODEL` / `DUNGEON_LLM_MODEL` | Modèles Groq de secours |
+| `DEEPGRAM_API_KEY` | STT |
 | `TTS_PROVIDER` | `cartesia` (default) ou `elevenlabs` |
 | `CARTESIA_API_KEY` / `CARTESIA_VOICE_ID` / `CARTESIA_MODEL` | Cartesia TTS |
 | `ELEVENLABS_API_KEY` / `ELEVENLABS_VOICE_ID` | ElevenLabs TTS (fallback) |
 | `TTS_LANGUAGE_CODE` | Default `fr` |
-| `DEBUG_AUDIO_DUMP` | Si `1`, dump le PCM reçu dans `/tmp/nidalheim-audio-*.raw` (dev only) |
+| `DEBUG_AUDIO_DUMP` | Si `1`, dump le PCM reçu (dev only) |
 
 ## Structure du code
 
 ```
 services/api-game/src/
-├── index.js                  # Point d'entrée : ws server + auth + routing /text vs /audio
-├── audioPipeline.js          # Orchestration STT → LLM → TTS pour /audio
-├── conversationStore.js      # Persistence chat_messages (loadRecent, appendTurn)
-├── db.js                     # Pool pg lazy (throw si DATABASE_URL manquant)
-├── systemPrompt.js           # Le prompt système partagé text + audio
+├── index.ts                  # ws server + auth + routing /text vs /audio + contrôle missions
+├── audioPipeline.ts          # Orchestration STT → LLM → TTS pour /audio
+├── systemPrompt.ts           # Prompt système (personnalité + missions + inventaire + règles)
+├── missionState.ts           # Registre état missions/inventaire par (user, npc), partagé texte/vocal
+├── missionTool.ts            # Règles déterministes (confier / valider) + notes système
+├── dungeonExpansion.ts       # Génération LLM de l'extension du donjon (+ validation, auto-réparation)
+├── conversationStore.ts      # Persistence chat_messages (loadRecent, appendTurn)
+├── questGenerator|Store|Routes|Validator.ts   # Canal REST /quests/* (séparé, non consommé par le client)
+├── db.ts                     # Pool pg lazy
 └── providers/
-    ├── deepgram.js           # DeepgramStreamingSTT (WS → transcripts)
-    ├── cartesia.js           # CartesiaStreamingTTS (WS persistant → PCM)
-    ├── elevenlabs.js         # ElevenLabsStreamingTTS (WS per-turn → PCM)
-    └── llm.js                # LLMStreaming (OpenAI SDK Groq-compat, streaming)
+    ├── chatEngine.ts         # Moteur LLM unifié (OpenAI primaire, Groq secours, streaming)
+    ├── deepgram.ts           # DeepgramStreamingSTT
+    ├── cartesia.ts           # CartesiaStreamingTTS (WS persistant)
+    └── elevenlabs.ts         # ElevenLabsStreamingTTS
 ```
+
+## Voir aussi
+
+- [Donjon & missions](/docs/unreal-engine/quests) — l'IR du donjon, le flux complet côté client.
+- [Voice pipeline](/docs/backend/voice-pipeline) — le détail STT/LLM/TTS.
