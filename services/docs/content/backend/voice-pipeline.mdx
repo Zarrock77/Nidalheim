@@ -13,10 +13,12 @@ Le endpoint `/audio` de `api-game` orchestre un pipeline streaming **STT → LLM
 | Stage | Provider | Modèle |
 |-------|----------|--------|
 | STT (speech-to-text) | **Deepgram** | Nova-3 streaming |
-| LLM | **Groq** (OpenAI-compat) | `llama-3.3-70b-versatile` |
+| LLM | **OpenAI** (primaire) | `gpt-5.4-mini` — secours : Groq `llama-3.3-70b-versatile` |
 | TTS (text-to-speech) | **Cartesia** | `sonic-2`, voix française |
 
 Fallback TTS : **ElevenLabs** (activable via `TTS_PROVIDER=elevenlabs`).
+
+Le LLM est le même moteur que le chat texte (`providers/chatEngine.ts`) : appels à `temperature: 0` + seed fixe (déterminisme), règles de missions évaluées par le code à chaque tour, historique partagé — on peut commencer une conversation à l'écrit et la finir à l'oral.
 
 ## Architecture de flux
 
@@ -28,8 +30,8 @@ Fallback TTS : **ElevenLabs** (activable via `TTS_PROVIDER=elevenlabs`).
       │                                                                 │
       ▼                                                                 │
 ┌────────────┐     ┌────────────┐     ┌────────────┐     ┌────────────┐│
-│ Deepgram   │────▶│ LLMStream  │────▶│  Cartesia  │────▶│  AudioPipe │┘
-│  STT WS    │     │ (Groq WS)  │     │   TTS WS   │     │            │
+│ Deepgram   │────▶│ ChatEngine │────▶│  Cartesia  │────▶│  AudioPipe │┘
+│  STT WS    │     │ (OpenAI)   │     │   TTS WS   │     │            │
 │            │     │            │     │ (persistent│     │            │
 └────────────┘     └────────────┘     │   per user)│     └────────────┘
      ▲                                └────────────┘
@@ -67,9 +69,9 @@ Fallback TTS : **ElevenLabs** (activable via `TTS_PROVIDER=elevenlabs`).
 3. **Hydration** (parallèle, non-bloquant) : `ConversationStore.loadRecent(userId, 20)` → injecté dans le contexte LLM
 4. **Stream PCM** → Deepgram émet `onInterim` (partial) et `onFinal` (speech_final)
 5. **`COMMIT`** reçu (ou `speech_final` de Deepgram) → accumulation du transcript
-6. **`_flushUtterance`** : appelle `llm.streamResponse(userText)`
+6. **`_flushUtterance`** : applique les règles déterministes de missions puis appelle `chatEngine.respond(messages, { stream: true })`
    - Chaque delta token → `tts.sendText(delta)` → Cartesia émet du PCM en streaming
-   - `onComplete` → `tts.flush()` + persist du tour (user + assistant) en transaction Postgres
+   - À la fin → `tts.flush()` + persist du tour (user + assistant) en transaction Postgres
 7. L'utilisateur peut reparler → retour étape 4
 
 ## Latency budget
@@ -79,7 +81,7 @@ Sur une utterance courte ("salut") :
 | Step | Latency observée |
 |------|------------------|
 | STT final (Deepgram) | 100-200 ms après fin d'élocution |
-| LLM first token (Groq Llama 70B) | 150-300 ms |
+| LLM first token (gpt-5.4-mini) | 200-400 ms |
 | TTS first chunk (Cartesia persistent) | 200-400 ms |
 | **Total** (fin élocution → first audio) | **~500-900 ms** |
 
@@ -150,4 +152,4 @@ ffplay -f s16le -ar 48000 -ac 1 /tmp/nidalheim-audio-Zarrock-1714000000.raw
 
 ## System prompt
 
-Le system prompt PNJ est dans `services/api-game/src/systemPrompt.js` — static, jamais stocké en DB (identique pour tous les users, change rarement, gérable via code review).
+Construit à chaque tour par `services/api-game/src/systemPrompt.ts` : personnalité de base du PNJ (`npcs.system_prompt` en DB) + missions du donjon et leur état + inventaire fouillé du joueur (avec lore des butins) + règles de style. Identique pour le texte et le vocal — voir [api-game](/docs/backend/services/api-game).

@@ -1,0 +1,313 @@
+---
+title: Arbre de talents
+---
+
+# Arbre de talents
+
+L'arbre de talents vit dans `Source/Nidalheim/AbilitySystem/Talents/` (données + composant) et `Source/Nidalheim/UI/Talents/` (les trois widgets). Un talent est décrit par un **data asset** (`UNidalheimTalentDataAsset`), accordé par un **composant d'acteur** (`UNidalheimTalentTreeComponent`) qui dépense des points et applique le payload GAS, et affiché par un **menu** de nœuds cliquables (`UNidalheimTalentTreeWidget` / `UNidalheimTalentWidget` / `UNidalheimTalentDescriptionWidget`).
+
+L'ensemble est un port fidèle d'un système Blueprint d'origine (`PDA_Talent`, `TalentTreeComponent`, `W_TalentTree` / `W_Talent` / `W_TalentDescription`). Débloquer un talent **octroie ses abilities** (elles apparaissent dans la barre GAS) et/ou **applique ses GameplayEffects** (stats), au niveau du talent ; monter de niveau re-scale les deux.
+
+> ⚠️ **Divergence avec la doc EIP** : le document `Nidalheim_Context_Cowork.docx` décrit un schéma `AC_AIBrain` / REST côté PNJ. Ce qui suit décrit l'implémentation réelle de l'arbre de talents, indépendante de la chaîne IA des PNJ.
+
+## Flux d'ensemble
+
+```
+UNidalheimTalentDataAsset (data : coût, prérequis, abilities, effets, icônes, descriptions)
+        │  référencé par
+        ▼
+UNidalheimTalentTreeComponent  (sur le pawn joueur)
+   Initialize(...)  →  GrantTalent(...) pour les DefaultTalents (points ignorés)
+   SpendPointOnTalent(Talent)
+        ├─ déjà accordé ?  →  LevelUpGrantedTalent  →  SetAbilityLevel + SetActiveGameplayEffectLevel
+        └─ sinon           →  GrantTalent (niveau 1)
+                                ├─ GiveAbilitiesToOwner    →  Owner->GrantAbilities(...)  →  barre GAS
+                                ├─ ApplyGameplayEffectsToOwner →  ASC->ApplyGameplayEffectSpecToSelf(...)
+                                └─ RemoveAbilitiesFromOwner →  ASC->ClearAbility(...)
+        └─ DeductTalentPoints  →  PointsAvailable -= coût
+                                       │  broadcast
+            OnTalentsChanged / OnPointsChanged
+        │  écoutés par
+        ▼
+UNidalheimTalentTreeWidget (compteur + grilles)  →  UNidalheimTalentWidget (nœud)  →  UNidalheimTalentDescriptionWidget (tooltip)
+```
+
+## Le data asset — `UNidalheimTalentDataAsset`
+
+Sous-classe de `UPrimaryDataAsset`. Tous ses champs sont `EditDefaultsOnly` : un talent est une donnée d'asset, jamais réglée par instance. Le `Name` sert de clé (les widgets retrouvent les talents par nom via `UNidalheimGameInstance::FindTalent`).
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Talents/NidalheimTalentDataAsset.h
+UCLASS(BlueprintType)
+class NIDALHEIM_API UNidalheimTalentDataAsset : public UPrimaryDataAsset
+{
+    GENERATED_BODY()
+public:
+    ENidalheimTalentType Type = ENidalheimTalentType::Active;   // Active / Passive / Triggered
+    FName Name;                                                 // identifiant + clé de recherche
+    TObjectPtr<UMaterialInterface> Icon = nullptr;              // icône au repos
+    TObjectPtr<UMaterialInterface> ActiveIcon = nullptr;        // icône dès niveau >= 1
+    FText Description;
+    TArray<FText> DescriptionPerLevel;                          // index 0 = niveau 1
+    int32 MaxLevel = 1;
+    TObjectPtr<UNidalheimTalentDataAsset> PrerequisiteTalent = nullptr;
+    TArray<TObjectPtr<UNidalheimTalentDataAsset>> BlockedByTalents;
+    TArray<int32> PointsRequiredPerLevel;                       // [i] = coût du niveau i+1
+    TArray<TSubclassOf<UGameplayAbility>> AbilitiesToGrant;     // → barre GAS
+    TArray<TSubclassOf<UGameplayAbility>> AbilitiesToRemove;    // retirées au grant
+    TArray<TSubclassOf<UGameplayEffect>> EffectsToApply;        // stats, au niveau du talent
+};
+```
+
+### Champs
+
+| Champ | Type | Rôle |
+|---|---|---|
+| `Type` | `ENidalheimTalentType` | `Active` / `Passive` / `Triggered` (métadonnée, n'altère pas l'octroi). |
+| `Name` | `FName` | Identifiant du talent et clé de recherche (`FindTalent`, `GetGrantedTalentsByName`). Affiché comme nom du nœud et titre du tooltip. |
+| `Icon` | `UMaterialInterface*` | Matériau `MI_TalentIcon_*` affiché au repos (talent non encore acheté). |
+| `ActiveIcon` | `UMaterialInterface*` | Affichée dès qu'au moins un niveau est acheté (seul critère du switch d'icône). |
+| `Description` | `FText` | Description globale, titre du corps de tooltip. |
+| `DescriptionPerLevel` | `TArray<FText>` | Description par niveau (index 0 = niveau 1). Pilote la visibilité des sections « Level N » / « Next Level (N) » du tooltip. |
+| `MaxLevel` | `int32` | Nombre de niveaux achetables (défaut `1`). Borne le level-up et le clamp du niveau de départ. |
+| `PrerequisiteTalent` | `UNidalheimTalentDataAsset*` | Talent requis avant achat (doit être accordé). `null` = aucun prérequis. |
+| `BlockedByTalents` | `TArray<...>` | Posséder l'un de ces talents interdit l'achat de celui-ci (exclusivité mutuelle). |
+| `PointsRequiredPerLevel` | `TArray<int32>` | Coût en points par niveau ; `[i]` = coût du niveau `i+1`. Hors bornes → `0`, puis clampé `[1, 999999]` (jamais gratuit). |
+| `AbilitiesToGrant` | `TArray<TSubclassOf<UGameplayAbility>>` | Abilities octroyées au déblocage (apparaissent dans la barre GAS). |
+| `AbilitiesToRemove` | `TArray<TSubclassOf<UGameplayAbility>>` | Abilities retirées au moment du grant (ex. remplacer une ability de base). |
+| `EffectsToApply` | `TArray<TSubclassOf<UGameplayEffect>>` | GameplayEffects appliqués au déblocage (ex. `+max stamina/health/shield`), au niveau du talent. |
+
+## Le composant — `UNidalheimTalentTreeComponent`
+
+`UActorComponent` posé sur le pawn joueur. Il détient les points disponibles (`PointsAvailable`) et la liste des talents accordés (`GrantedTalents`, des `FNidalheimGrantedTalent` = `{ Talent, Level }`). Au démarrage il résout `OwnerCharacter` + `OwnerASC` depuis son propriétaire.
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Talents/NidalheimTalentTreeComponent.cpp
+void UNidalheimTalentTreeComponent::Initialize(const TArray<FNidalheimGrantedTalent>& InGrantedTalents, int32 InPointsAvailable)
+{
+    InitializeVariables();
+    if (!GetOwner() || !GetOwner()->HasAuthority()) { return; }   // rien hors autorité
+
+    // Param > -1 = points explicites (sauvegarde) ; sinon DefaultTalentPoints.
+    PointsAvailable = (InPointsAvailable > -1) ? InPointsAvailable : DefaultTalentPoints;
+    NotifyPointsChanged();
+
+    const TArray<FNidalheimGrantedTalent>& Source = InGrantedTalents.Num() > 0 ? InGrantedTalents : DefaultTalents;
+    for (const FNidalheimGrantedTalent& Item : Source)
+    {
+        GrantTalent(Item.Talent, Item.Level, /*bSkipPointsCheck=*/true);   // talents de départ : gratuits
+    }
+}
+```
+
+`DefaultTalents` (réglés en éditeur, équivalent BP : *Sword Combo / Sword Swing / Fill Shields* niveau 1) sont accordés sans dépenser de points.
+
+> ⚠️ **Autorité.** `Initialize` ne fait rien si le propriétaire n'a pas l'autorité (`HasAuthority()`). De même `SpendPointOnTalent` est l'équivalent du RPC serveur `Srvr_SpendPointOnTalent` d'origine — en standalone, appel direct.
+
+> ⚠️ **Réplication.** L'original répliquait `GrantedTalents` / `PointsAvailable` en push-model et appelait les `OnRep` manuellement côté serveur. Ce port conserve **uniquement** les notifications manuelles (`NotifyTalentsChanged` / `NotifyPointsChanged`, qui broadcastent `OnTalentsChanged` / `OnPointsChanged`) — comportement identique en jeu standalone, mais les états ne sont **pas** marqués pour réplication réseau.
+
+### Déblocage et montée de niveau
+
+`SpendPointOnTalent` est le point d'entrée unique : si le talent est déjà accordé il le monte d'un niveau, sinon il l'accorde au niveau 1. Les points ne sont déduits que si la mutation a réussi.
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Talents/NidalheimTalentTreeComponent.cpp
+void UNidalheimTalentTreeComponent::SpendPointOnTalent(UNidalheimTalentDataAsset* Talent)
+{
+    FNidalheimGrantedTalent Found;
+    if (FindGrantedTalent(Talent, Found))
+    {
+        if (LevelUpGrantedTalent(Found)) { DeductTalentPoints(Talent); }
+    }
+    else if (GrantTalent(Talent, /*StartingLevel=*/1, /*bSkipPointsCheck=*/false))
+    {
+        DeductTalentPoints(Talent);
+    }
+}
+```
+
+Les gates d'achat sont dans `CanGiveTalent` (pas déjà accordé **et** prérequis présent **et** assez de points **et** non bloqué) et `CanLevelUpTalent` (`MaxLevel > Level` **et** assez de points pour le niveau suivant). `CanSpendPointsOnTalent` combine les deux pour le gating UI.
+
+### Octroi du payload GAS
+
+`GrantTalent` clampe le niveau de départ dans `[1, MaxLevel]` puis applique les trois listes du data asset :
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Talents/NidalheimTalentTreeComponent.cpp
+bool UNidalheimTalentTreeComponent::GrantTalent(UNidalheimTalentDataAsset* Talent, int32 StartingLevel, bool bSkipPointsCheck)
+{
+    if (!CanGiveTalent(Talent, bSkipPointsCheck)) { return false; }
+    const int32 ClampedLevel = FMath::Clamp(StartingLevel, 1, Talent->MaxLevel);
+
+    GiveAbilitiesToOwner(Talent, Talent->AbilitiesToGrant, ClampedLevel);     // → barre GAS
+    ApplyGameplayEffectsToOwner(Talent, Talent->EffectsToApply, ClampedLevel); // stats
+    RemoveAbilitiesFromOwner(Talent->AbilitiesToRemove);                       // retraits
+
+    FNidalheimGrantedTalent Entry{ Talent, ClampedLevel };
+    GrantedTalents.Add(Entry);
+    NotifyTalentsChanged();
+    return true;
+}
+```
+
+- **Abilities** : `GiveAbilitiesToOwner` délègue à `OwnerCharacter->GrantAbilities(Abilities, Level)` et mémorise les `FGameplayAbilitySpecHandle` retournés dans `AbilitySpecsGrantedByTalent` (par talent) — pour pouvoir re-scaler ces specs au level-up.
+- **Effets** : chaque `UGameplayEffect` est appliqué via `MakeOutgoingSpec(EffectClass, Level, ...)` puis `ApplyGameplayEffectSpecToSelf`. Le **niveau du GE = niveau du talent**, donc les magnitudes scalent via les `ScalableFloat` / courbes de l'effet. Les `FActiveGameplayEffectHandle` sont stockés dans `EffectHandlesAppliedByTalent`.
+- **Retraits** : `RemoveAbilitiesFromOwner` parcourt `GetActivatableAbilities()` et `ClearAbility` **toutes** les instances dont la classe figure dans `AbilitiesToRemove`.
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Talents/NidalheimTalentTreeComponent.cpp
+void UNidalheimTalentTreeComponent::ApplyGameplayEffectsToOwner(UNidalheimTalentDataAsset* Talent, const TArray<TSubclassOf<UGameplayEffect>>& Effects, int32 Level)
+{
+    if (!OwnerASC) { return; }
+    FNidalheimTalentEffectHandles Applied;
+    for (const TSubclassOf<UGameplayEffect>& EffectClass : Effects)
+    {
+        if (!EffectClass) { continue; }
+        const FGameplayEffectSpecHandle Spec = OwnerASC->MakeOutgoingSpec(EffectClass, static_cast<float>(Level), OwnerASC->MakeEffectContext());
+        if (Spec.IsValid())
+        {
+            Applied.GameplayEffectHandles.AddUnique(OwnerASC->ApplyGameplayEffectSpecToSelf(*Spec.Data.Get()));
+        }
+    }
+    EffectHandlesAppliedByTalent.Add(Talent, Applied);
+}
+```
+
+Au level-up, `LevelUpGrantedTalent` incrémente le niveau de l'entrée puis re-scale **sans** ré-octroyer : `SetLevelOfAbilitiesGrantedByTalent` appelle `UNidalheimGameplayAbility::SetAbilityLevel(NewLevel)` sur chaque spec mémorisée, et `SetLevelOfEffectsAppliedByTalent` appelle `OwnerASC->SetActiveGameplayEffectLevel(Handle, NewLevel)` sur chaque effet actif.
+
+### Coût des points
+
+```cpp
+// Source/Nidalheim/AbilitySystem/Talents/NidalheimTalentTreeComponent.cpp
+int32 UNidalheimTalentTreeComponent::GetRequiredPoints(const UNidalheimTalentDataAsset* Talent, bool bNextLevel) const
+{
+    if (!Talent) { return 1; }
+    int32 Index = 0;
+    FNidalheimGrantedTalent Found;
+    if (FindGrantedTalent(Talent, Found))
+    {
+        Index = Found.Level - (bNextLevel ? 0 : 1);
+    }
+    const int32 Raw = Talent->PointsRequiredPerLevel.IsValidIndex(Index) ? Talent->PointsRequiredPerLevel[Index] : 0;
+    return FMath::Clamp(Raw, 1, 999999);   // hors bornes -> 0, mais jamais gratuit
+}
+```
+
+> ⚠️ `DeductTalentPoints` est appelé **après** la mutation, avec `bNextLevel=false` : il retombe donc sur le coût du niveau qui vient d'être atteint. Hors plage de `PointsRequiredPerLevel`, le coût est forcé à `1` (clamp `[1, 999999]`) — un talent n'est jamais gratuit, même tableau vide.
+
+### API utile
+
+| Membre | Rôle |
+|---|---|
+| `Initialize(InGrantedTalents, InPointsAvailable)` | Points + talents de départ (sauvegarde ou défauts). Autorité requise. |
+| `SpendPointOnTalent(Talent)` | Accorde (niveau 1) ou monte d'un niveau, déduit le coût. |
+| `CanSpendPointsOnTalent(Talent)` | Gating UI (level-up possible si accordé, sinon achat possible). |
+| `FindGrantedTalent(Talent, Out)` / `HasTalent(Talent)` | Recherche un talent accordé + son niveau. |
+| `GetRequiredPoints(Talent, bNextLevel)` | Coût du niveau courant ou suivant. |
+| `GetPointsAvailable()` | Points restants. |
+| `AddTalentPoints(Amount)` | Recalage par le système de sauvegarde (clamp `>= 0`). |
+| `GetGrantedTalentsByName()` | `Name → Talent` pour la sauvegarde (les niveaux n'y sont pas — ils repartent à 1 au rechargement, comme l'original). |
+| `OnTalentsChanged` / `OnPointsChanged` | Délégués multicast écoutés par l'UI. |
+
+## Les widgets UI
+
+```
+UNidalheimTalentTreeWidget   (menu : 3 grilles Staff / Common / Axe + compteur de points)
+   └── UNidalheimTalentWidget        (nœud 130x130 : icône, badge de niveau, voile, barre de maintien)
+         └── UNidalheimTalentDescriptionWidget  (tooltip au survol/focus : titre, descriptions, points requis)
+```
+
+### Le menu — `UNidalheimTalentTreeWidget`
+
+Construit son visuel en C++ (`RebuildWidget` → `BuildLayout`) : trois colonnes de talents (Staff / Common / Axe), une bande de preview du personnage à droite, et un compteur « Talent Points Available: N » en bas. Au `NativeConstruct` il retrouve le composant sur le pawn (`FindComponentByClass`), s'abonne à `OnPointsChanged`, câble les nœuds (`WireTalents`) puis se replie (`Collapsed`).
+
+```cpp
+// Source/Nidalheim/UI/Talents/NidalheimTalentTreeWidget.cpp
+void UNidalheimTalentTreeWidget::NativeConstruct()
+{
+    Super::NativeConstruct();
+    SetIsFocusable(true);                                   // nécessaire pour OnKeyDown
+    if (APawn* Pawn = GetOwningPlayerPawn())
+    {
+        Component = Pawn->FindComponentByClass<UNidalheimTalentTreeComponent>();
+        if (Component && !Component->OnPointsChanged.IsAlreadyBound(this, &UNidalheimTalentTreeWidget::HandlePointsChanged))
+        {
+            Component->OnPointsChanged.AddDynamic(this, &UNidalheimTalentTreeWidget::HandlePointsChanged);
+        }
+    }
+    WireTalents();
+    SetTalentPointsText();
+    SetVisibility(ESlateVisibility::Collapsed);             // s'ouvre via Show()
+}
+```
+
+`WireTalents` assigne chaque nœud à son talent par nom (`UNidalheimGameInstance::FindTalent`) puis appelle `SetTalentInfo`. `Show()` / `Hide()` jouent une anim de slide (translation `-1280 → 0` + fondu sur 0.25 s) et spawnent/détruisent un rig caméra `ANidalheimCharacterPreview` attaché au mesh du joueur (blend caméra). `ToggleMenu` / `NativeOnKeyDown` ouvrent/ferment via la touche `IA_ToggleTalentTree`.
+
+Sur `OnPointsChanged`, `HandlePointsChanged` rafraîchit le compteur puis chaque nœud des grilles Staff → Common → Axe (`UpdateGridTalents` → `Node->Refresh()`).
+
+> ⚠️ **Contenu Staff non terminé (fidèle à l'original).** Les 6 nœuds Staff (`FireProjectile`, `LightningStrike`, `ShieldBubble`, `Burn`, `Freeze`, `IceProjectile`) **et** `MaxHealthNode` retombent tous sur le talent `Max Health` : dans le BP d'origine ces nœuds n'avaient pas d'override `TalentDA` et héritaient du défaut. Les talents réellement câblés sont `Dash`, `Max Stamina`, `Max Health`, `Stamina Regen`, `Sword Combo`, `Sword Swing`, `Fill Shields`.
+
+### Le nœud — `UNidalheimTalentWidget`
+
+Carré 130x130 : icône `MI_TalentIcon_*`, badge de niveau (`n/Max` ou `MAX`), voile gris « non achetable », barre de maintien orange, nom sous l'icône, et un bouton invisible plein cadre qui capte press/release.
+
+`SetTalentInfo(Talent, Component, TreeWidget)` câble le nœud, s'abonne à `OnTalentsChanged`, crée le tooltip et appelle `Refresh`. `Refresh` lit l'état du composant : nom, texte de niveau, choix `Icon`/`ActiveIcon` (selon `bGranted`), et couleur du voile (gris `(0.2, 0.2, 0.2, 0.42)` quand ni achetable ni au niveau max).
+
+L'achat se fait **en maintenant** le bouton 0.75 s (barre de progression à 30 Hz) ; relâcher avant la fin annule.
+
+```cpp
+// Source/Nidalheim/UI/Talents/NidalheimTalentWidget.cpp
+void UNidalheimTalentWidget::OnButtonPressed()
+{
+    if (!Talent || !Component || !Component->CanSpendPointsOnTalent(Talent)) { return; }  // gate
+    if (UWorld* World = GetWorld())
+    {
+        World->GetTimerManager().SetTimer(ButtonTimer, this, &UNidalheimTalentWidget::IncrementButtonTimer, TickStep, true);
+    }
+}
+
+void UNidalheimTalentWidget::ConfirmSpend()
+{
+    if (Talent && IsValid(Component)) { Component->SpendPointOnTalent(Talent); }  // achat OU level-up
+}
+```
+
+C'est donc `ConfirmSpend` → `Component->SpendPointOnTalent` qui déclenche tout le payload GAS décrit plus haut. Le rafraîchissement visuel arrive ensuite via `OnTalentsChanged` / `OnPointsChanged` (le nœud ne se redessine pas lui-même immédiatement).
+
+> ⚠️ Le tooltip est sondé en continu : un timer 10 Hz (`CheckFocusState`) montre/retire le tooltip selon `Button->IsHovered()` ou `Button->HasKeyboardFocus()`. Le tooltip est ajouté dans le `NamedSlot` (`TalentDescriptionPopup`) du **menu** et positionné au point viewport `(120, 0)` du nœud (à droite du bouton).
+
+### Le tooltip — `UNidalheimTalentDescriptionWidget`
+
+Cadre flouté (fond noir 70 % + liseré doré) affiché au survol/focus. `TalentDA` est posé avant l'ajout à l'écran (`ExposeOnSpawn` d'origine). `SetDetails()` relit l'état du `UNidalheimTalentTreeComponent` et remplit les sections.
+
+```cpp
+// Source/Nidalheim/UI/Talents/NidalheimTalentDescriptionWidget.cpp
+void UNidalheimTalentDescriptionWidget::SetDetails()
+{
+    if (!TalentDA) { return; }
+    int32 CurrentLevel = 0, NextLevel = 1;
+    if (IsValid(TalentTreeComponent))
+    {
+        FNidalheimGrantedTalent Granted;
+        TalentTreeComponent->FindGrantedTalent(TalentDA, Granted);
+        CurrentLevel = Granted.Level;
+        NextLevel = (CurrentLevel + 1 > TalentDA->MaxLevel) ? -1 : CurrentLevel + 1;   // -1 = niveau max
+        const int32 Points = TalentTreeComponent->GetRequiredPoints(TalentDA, /*bNextLevel=*/true);
+        // → "Points Required: {Points}"
+    }
+    TalentTitleText->SetText(FText::FromName(TalentDA->Name));
+    TalentDescriptionText->SetText(TalentDA->Description);
+    // sections "Level {N}" / "Next Level ({N})" affichées selon DescriptionPerLevel[level-1]
+}
+```
+
+- La section **« Level N »** (verte) n'est visible que si `DescriptionPerLevel[CurrentLevel - 1]` est non vide.
+- La section **« Next Level (N) »** (or) et **« Points Required: N »** (orange) ne sont visibles que si la description du niveau suivant existe ; au niveau max (`NextLevel = -1`), elles sont repliées.
+
+Le tooltip est rafraîchi par le nœud : sur `OnTalentsChanged`, `UNidalheimTalentWidget::HandleTalentChanged` appelle à la fois `Refresh()` (le nœud) et `TalentDescriptionPopup->SetDetails()` (le tooltip).
+
+## Voir aussi
+
+- [Gameplay Ability System](/docs/unreal-engine/gas)
+- [Abilities GAS](/docs/unreal-engine/gas/abilities)
+- [Chat & UI / HUD](/docs/unreal-engine/hud)

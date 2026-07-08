@@ -1,0 +1,121 @@
+---
+title: Donjon & missions
+---
+
+# Donjon & missions (F04–F11)
+
+Le cœur EIP de Nidalheim : un **donjon généré depuis un JSON** (l'IR, *intermediate representation*) qui définit aussi les **missions**, les **secrets** et l'état persistant de la partie — et qui **s'étend par LLM** à mesure que le joueur le pille. Le PNJ Olaf (gardien du village) confie et valide les missions dans le dialogue, mais **aucune décision de gameplay n'est prise par le LLM** : le code décide, le LLM raconte.
+
+## Vue d'ensemble
+
+```
+slice.json (IR du donjon : salles, liens, clés, missions, secrets, état)
+    │  génération runtime (gray-box : salles, couloirs, portes, torches)
+    ▼
+ANidalheimDungeonGenerator ──► items posés (objectif, secrets), gardiens, patrouilles
+    │
+    ├─► UNidalheimQuestSubsystem (état missions + inventaire → HUD)
+    │
+    ▼
+ANidalheimNPCCharacter ══ WebSocket texte ══► api-game
+      mission_sync / inventory_sync            règles déterministes :
+      dungeon_expand                           confier / valider (le CODE décide)
+      ◄══ mission_started / mission_validation_result / dungeon_extension
+```
+
+## L'IR du donjon — `slice.json`
+
+Fichier vivant : `<Projet>/DungeonPlans/slice.json` (`FNidDungeonPlan`, sérialisé par `FJsonObjectConverter`). Premier lancement : le plan par défaut est écrit puis rechargé — la génération passe **toujours** par le JSON.
+
+| Tableau | Struct | Contenu | État persisté |
+|---|---|---|---|
+| `nodes` | `FNidNode` | salles : `id`, `role` (`Entrance`, `Junction`, `Combat`, `SetPiece`, `Sanctuary`, `Objective`…) | `cellAssigned`/`cell` (layout figé) |
+| `links` | `FNidLink` | couloirs `from`/`to` ; `gateLockId` ≠ vide = porte verrouillée | `unlocked` |
+| `keys` | `FNidKey` | `lockId` + `nodeId` du gardien porteur de la clé | `killed` |
+| `encounters` | `FNidEncounter` | gardes sans clé (extension LLM) : `nodeId`, `budget` | `killed` |
+| `missions` | `FNidMission` | `id`, `name`, `objectiveItemId`, `objectiveDescription`, `missionPrompt` (consigne de rôle d'Olaf), `objectiveNodeId` | `started`, `completed` |
+| `secrets` | `FNidSecret` | objectifs secondaires : `id`, `itemId`, `nodeId`, `lorePrompt` | `collected` |
+
+Les cellules de grille sont **persistées** (`cellAssigned`/`cell`) : quand le donjon s'étend, les salles existantes **ne bougent jamais**.
+
+**Casse des clés JSON** : `FJsonObjectConverter` peut émettre `"iD"` au lieu de `"id"` dans une build packagée (la casse d'affichage d'un FName dépend de l'ordre d'enregistrement). Tout consommateur du JSON hors UE lit donc les clés sans sensibilité à la casse (`canonicalizeKeys()` côté `api-game`).
+
+## Génération runtime — `ANidalheimDungeonGenerator`
+
+`DungeonGen/` : types (`NidalheimDungeonTypes.h`), validateur (`NidDungeonValidator`), embedder (grille, `NidalheimDungeonEmbedder`), générateur. Déclenchée au démarrage du niveau (GameMode) et par la console `Nidalheim.GenDungeon`.
+
+- **Géométrie** : salles + couloirs en cubes moteur (ISM), portes bois sur les liens verrouillés, torches (`BP_Torch`), sous la map à l'ancre `EntryPoint` (l'entrée hand-built descend vers la première salle).
+- **Items** : l'item-objectif de la mission est posé dans la salle `Objective` (résolu par le **catalogue** `UNidalheimItemDatabase` — générique pour les missions LLM) ; les secrets dans leur salle (`SpawnSecretItem`). Le ramassage (`OnPickupTaken`) marque `collected`/l'état et **re-sauve le plan**.
+- **Gardiens** : un ennemi porteur de clé par entrée `keys` (sa mort dépose la clé dans l'inventaire et persiste `killed`), des gardes par `encounters`. Tous **patrouillent** entre le centre de leur salle et une salle voisine reliée par un lien non verrouillé (navmesh dynamique, marche ; poursuite/attaque via l'IA ennemie).
+- **Marqueur d'entrée** : `ANidalheimDungeonEntranceMarker` (TargetPoint posé dans le niveau, en haut des escaliers) — cible de la **flèche de guidage 3D** (`ANidalheimObjectiveArrowActor`, spawnée par le PlayerController) affichée haut-centre pendant la première mission et supprimée à l'arrivée.
+
+## Missions — client-driven, décision par le code
+
+Le client est la **source de vérité** : l'IR définit les missions, l'inventaire réel dit ce que le joueur porte. `UNidalheimQuestSubsystem` (ULocalPlayerSubsystem) tient l'état (`FNidalheimMissionState` : `bStarted`, `bCompleted`, `bObjectiveItemHeld` recalculé à chaque changement d'inventaire) et le PNJ le pousse au backend.
+
+### Messages WebSocket (canal texte du PNJ)
+
+| Message | Sens | Contenu |
+|---|---|---|
+| `mission_sync` | C → S | missions + état (`hasObjectiveItem`, `started`, `completed`) — à la connexion et à chaque changement |
+| `inventory_sync` | C → S | **inventaire entier** (`id`, `name`, `qty`, `dungeon`, `lore`) — la fouille d'Olaf |
+| `mission_started` | S → C | épreuve confiée → `MarkMissionStarted` (HUD visible, `started` persisté) |
+| `mission_validation_result` | S → C | épreuve validée → `MarkMissionCompleted`, l'objet est consommé, puis demande d'expansion |
+| `dungeon_expand` | C → S | plan complet + catalogue d'items posables (après une validation) |
+| `dungeon_extension` | S → C | extension générée par LLM → `ApplyExtensionInWorld` |
+| `clear_history` | C → S | vide l'historique de chat (utilisé par `Nidalheim.ResetGame`) |
+
+### Règles déterministes (backend, `applyDeterministicMissionActions`)
+
+Évaluées par le **code** à chaque message du joueur, sur les deux canaux (texte et vocal) — le LLM n'expose **aucun tool** :
+
+1. épreuve **confiée** dont l'objet est dans l'inventaire synchronisé → **validée** maintenant ;
+2. épreuve **pas encore confiée** → **confiée** maintenant.
+
+Les events partent au client, et des **notes système** sont injectées dans le prompt pour qu'Olaf annonce l'événement avec ses mots. Garanties : demander à intégrer le village confie la première mission ; revenir avec l'objet la valide ; mentionner un butin alors qu'une épreuve attend la déclenche. Ces scénarios sont couverts par un harnais E2E (`services/api-game/scripts/e2e-missions.mjs`).
+
+### Fouille & confiscation
+
+Olaf « voit » tout l'inventaire (`inventory_sync`) et connaît le lore des objets du donjon. Règle : il ne peut confisquer que les items marqués `bDungeonItem` (butin) — l'équipement personnel est intouchable. La consommation de l'objet validé est appliquée côté client (`ConsumeObjectiveItem`).
+
+## Secrets — objectifs secondaires
+
+Des items cachés dans les salles (dague kama, parchemin ancien…), définis par `secrets` dans l'IR. **Jamais transmis au PNJ** par `mission_sync` : Olaf ne les découvre que s'ils apparaissent dans l'inventaire (fouille), et réagit alors via leur `lorePrompt`. Les salles où un secret a été ramassé deviennent les **ancres** de l'expansion LLM.
+
+## Expansion par LLM
+
+Après chaque mission validée, le client envoie `dungeon_expand` (plan + catalogue). Côté `api-game` (`dungeonExpansion.ts`) :
+
+1. **Ancres** = salles pillées (missions accomplies + secrets ramassés) — lore : les pilleurs creusent plus profond derrière.
+2. Le LLM génère 2-3 salles en chaîne derrière une ancre, une porte verrouillée sur le premier lien (clé sur un gardien posté dans l'ancre), **une nouvelle mission** (enchaînée narrativement avec le butin trouvé, objet jamais réutilisé) et 1-2 secrets.
+3. **Validation stricte** côté serveur (ids, rôles, ancrage, clés/portes appariées) ; en cas de rejet, l'erreur est **renvoyée au modèle** qui corrige (auto-réparation, 3 essais par provider, attente sur rate-limit).
+4. Le client **re-valide le plan fusionné** (`ApplyExtensionInWorld`) — échec = zéro changement — puis régénère le donjon en place et recâble les missions.
+
+Un échec d'extension n'est jamais définitif : à la reconnexion, le client détecte « mission validée sans suite » et redemande (`TryResumeDungeonExpand`).
+
+## HUD
+
+- **Panneau objectifs** (bas-droite, voile noir translucide) : `0 / 1 <objet>` + `N / ? Secrets trouvés` — le total des secrets n'est **jamais** révélé. Visible uniquement entre `mission_started` et la validation.
+- **Flèche de guidage 3D** : pointe l'entrée du donjon (marqueur) pendant la première mission uniquement.
+
+## Persistance & reset
+
+Tout l'état vit dans `slice.json` (+ l'inventaire dans `SaveGames/`). Une **baseline pristine** est figée dans `<Projet>/GameInitial/` à la première création. Commandes console (utilisables aussi depuis le chat, préfixées `/`) :
+
+| Commande | Effet |
+|---|---|
+| `Nidalheim.ResetGame` | baseline → live (donjon + inventaire), historique de chat vidé, donjon régénéré |
+| `Nidalheim.MakeBaseline` | fige l'état courant comme nouvelle baseline |
+| `Nidalheim.GenDungeon` | régénère le donjon depuis le `slice.json` courant |
+
+**Builds packagées** : le packaging ne nettoie pas le dossier cible. Après avoir joué, supprimer `DungeonPlans/`, `GameInitial/` et `Saved/SaveGames/` (ou lancer `/Nidalheim.ResetGame`) pour retester depuis zéro.
+
+## Déterminisme (fiabilité démo)
+
+Tous les appels LLM (dialogue, décision, expansion) tournent à `temperature: 0` avec un seed fixe : mêmes entrées → mêmes sorties. Combiné aux règles déterministes, un script de démo (mêmes phrases, état reset) est **rejouable à l'identique**.
+
+## Voir aussi
+
+- [PNJ — ANidalheimNPCCharacter](/docs/unreal-engine/characters/npc) — le pont WebSocket (syncs, events, reconnexion).
+- [api-game](/docs/backend/services/api-game) — règles déterministes, prompt système, expansion LLM.
+- [Voice pipeline](/docs/backend/voice-pipeline) — le canal vocal partage moteur, règles et historique.

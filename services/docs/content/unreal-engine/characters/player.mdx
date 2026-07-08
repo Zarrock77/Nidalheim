@@ -82,58 +82,76 @@ Pas de C++ pour ça — itère sur la sensation caméra sans recompile.
 
 ## GAS — Gameplay Ability System
 
-Le character hérite de `ANidalheimCharacterBase` qui intègre la stack GAS standard Epic.
+Le character hérite de `ANidalheimCharacterBase` qui intègre la stack GAS, **entièrement en C++** (convention `Nidalheim*`). Détails complets : [Gameplay Ability System](/docs/unreal-engine/gas).
 
 ### Composants
 
+La classe de base crée l'ASC + **deux** attribute sets (`Basic`, `Combat`). Le **PlayerCharacter** ajoute en plus le set `Survival` et le composant de survie :
+
 ```cpp
-// ANidalheimCharacterBase
+// ANidalheimCharacterBase (base)
 UPROPERTY(VisibleAnywhere)
-UNidalheimAbilitySystemComponent* AbilitySystemComponent;
+TObjectPtr<UNidalheimAbilitySystemComponent> AbilitySystemComponent;
 
 UPROPERTY(VisibleAnywhere)
-UNidalheimAttributeSet* AttributeSet;
+TObjectPtr<UNidalheimBasicAttributeSet> BasicAttributeSet;
+
+UPROPERTY(VisibleAnywhere)
+TObjectPtr<UNidalheimCombatAttributeSet> CombatAttributeSet;
 
 UPROPERTY(EditDefaultsOnly, Category = "Abilities")
 TArray<TSubclassOf<UNidalheimGameplayAbility>> StartingAbilities;
+
+// ANidalheimPlayerCharacter (en plus)
+UPROPERTY(VisibleAnywhere)
+TObjectPtr<UNidalheimSurvivalAttributeSet> SurvivalAttributeSet;
+
+UPROPERTY(VisibleAnywhere)
+TObjectPtr<UNidalheimSurvivalComponent> Survival;
 ```
+
+> ⚠️ Il y a **trois** attribute sets (`Basic`, `Combat`, `Survival`), et non plus un seul `UNidalheimAttributeSet`. Voir [Attribute Sets](/docs/unreal-engine/gas/attributes) et [Système de survie](/docs/unreal-engine/survival).
 
 ### Lifecycle
 
 ```
-PossessedBy(Controller)
+PossessedBy(Controller)               (serveur)
+OnRep_PlayerState()                   (client)
   → AbilitySystemComponent->InitAbilityActorInfo(this, this)
-  → For each StartingAbility:
-      AbilitySystemComponent->GiveAbility(FGameplayAbilitySpec(...))
+  → GrantAbilities() : pour chaque StartingAbility, GiveAbility(FGameplayAbilitySpec(...))
 ```
 
 ### Ajouter une ability
 
 1. Sous-classer `UNidalheimGameplayAbility` dans `Source/Nidalheim/AbilitySystem/Abilities/`
 2. Override `ActivateAbility` (et éventuellement `CanActivateAbility`, `EndAbility`)
-3. L'ajouter à `StartingAbilities` du `BP_PlayerCharacter` (Class Defaults > Abilities)
+3. L'ajouter aux `StartingAbilities` du `BP_PlayerCharacter` (Class Defaults > Abilities)
+
+Voir le catalogue complet : [Gameplay Abilities](/docs/unreal-engine/gas/abilities).
 
 ### Ajouter un attribut
 
-1. Étendre `UNidalheimAttributeSet` dans `Source/Nidalheim/AbilitySystem/Attributes/`
-2. Déclarer le `FGameplayAttributeData` + macros `ATTRIBUTE_ACCESSORS`
-3. Ajouter la réplication via `OnRep_*` callback + `GetLifetimeReplicatedProps`
+1. Étendre l'attribute set adéquat (`Basic`/`Combat`/`Survival`) dans `Source/Nidalheim/AbilitySystem/Attributes/`, ou en créer un nouveau
+2. Déclarer le `FGameplayAttributeData` + la macro `ATTRIBUTE_ACCESSORS_BASIC` (fournie par l'**engine**, pas le projet)
+3. Ajouter la réplication via `OnRep_*` + `GetLifetimeReplicatedProps`, et le clamp dans `PreAttributeChange`
 
 ### Réplication
 
 ```cpp
-void UNidalheimAttributeSet::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+void UNidalheimBasicAttributeSet::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
     Super::GetLifetimeReplicatedProps(OutLifetimeProps);
-    DOREPLIFETIME_CONDITION_NOTIFY(UNidalheimAttributeSet, Health, COND_None, REPNOTIFY_Always);
+    DOREPLIFETIME_CONDITION_NOTIFY(UNidalheimBasicAttributeSet, Health, COND_None, REPNOTIFY_Always);
     // …
 }
 
-void UNidalheimAttributeSet::OnRep_Health(const FGameplayAttributeData& OldHealth)
+void UNidalheimBasicAttributeSet::OnRep_Health(const FGameplayAttributeData& OldHealth)
 {
-    GAMEPLAYATTRIBUTE_REPNOTIFY(UNidalheimAttributeSet, Health, OldHealth);
+    GAMEPLAYATTRIBUTE_REPNOTIFY(UNidalheimBasicAttributeSet, Health, OldHealth);
 }
 ```
+
+> ⚠️ Détail relevé dans le code : `Shield`/`MaxShield` (set `Basic`) ont un `ReplicatedUsing` mais **ne sont pas** enregistrés dans `GetLifetimeReplicatedProps` — non répliqués en l'état. Voir [Attribute Sets](/docs/unreal-engine/gas/attributes).
 
 ## Voir aussi
 

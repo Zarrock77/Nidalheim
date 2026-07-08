@@ -64,7 +64,7 @@ ANidalheimInGameNPC (sphère d'interaction)
 PlayerController (touche P)
   → UNidalheimChatSubsystem::StartAudioCapture
        → ANidalheimNPCCharacter::StartAudioCapture
-            → AudioCaptureComponent capture device
+            → capture miniaudio (device WASAPI)
 
 (joueur relâche P)
   → UNidalheimChatSubsystem::CommitAudioBuffer

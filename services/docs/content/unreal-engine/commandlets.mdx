@@ -1,0 +1,174 @@
+---
+title: Commandlets éditeur
+---
+
+# Commandlets éditeur (maintenance d'assets)
+
+Le module runtime `Nidalheim` (`client/Source/Nidalheim/System/`) embarque quatre `UCommandlet`
+dédiés à la **chirurgie d'assets en batch** : ils touchent des propriétés ou des structures d'assets
+(AnimBP, BlendSpace, SkeletalMesh, AnimMontage) que l'API Python de l'éditeur n'expose pas, ou qui
+demandent une retriangulation/recompilation programmatique.
+
+Ce sont des outils **éditeur-only** : chaque commandlet a son constructeur réglé sur
+`IsEditor = true` (jamais `IsClient`/`IsServer`) et tout son corps est gardé par `#if WITH_EDITOR`.
+Ils ne font donc rien dans un build game/client.
+
+> ⚠️ **Éditeur uniquement.** Hors éditeur, le `Main()` de chacun tombe dans la branche `#else` qui
+> log une erreur (`"... : editor uniquement."`) et renvoie `1`. Ces commandlets ne sont à lancer que
+> via `UnrealEditor-Cmd.exe`, jamais empaquetés dans une build de jeu.
+
+## Vue d'ensemble
+
+| Commandlet | Rôle | Asset cible |
+|------------|------|-------------|
+| `NidalheimAddAimSpinePitch` | Injecte la chaîne de visée verticale (variable `AimSpineRotation` + nœuds de conversion d'espace + 3 `ModifyBone` additifs sur `spine_02/03/04`) dans l'AnimGraph, puis recompile/resauve les enfants | `ABP_Unarmed` (+ enfants `ABP_Bow`, `ABP_Sword`, `ABP_Staff`) |
+| `NidalheimResampleBlendSpace` | Revalide et reconstruit la triangulation runtime (`BlendSpaceData`) d'un BlendSpace, puis resauve | un `UBlendSpace` (argument `-Asset=`) |
+| `NidalheimRestoreStaffSockets` | Recrée deux sockets perdus avec leurs transforms exacts d'origine, et active `bUsedWithSkeletalMesh` sur un matériau | `SKM_Quinn_Simple` + `MM_MasterMaterialLeartesStudios` |
+| `NidalheimSetMontageSlot` | Change le `SlotName` des pistes d'un ou plusieurs AnimMontage | un ou plusieurs `UAnimMontage` (argument `-Montages=`) |
+
+## Lancement type
+
+La forme générale pour exécuter un commandlet UE :
+
+```bash
+UnrealEditor-Cmd.exe <Chemin>/Nidalheim.uproject -run=<NomDuCommandlet> [arguments]
+```
+
+Le nom passé à `-run=` est celui de la classe sans le préfixe `U` ni le suffixe `Commandlet`
+(ex. `UNidalheimResampleBlendSpaceCommandlet` -> `-run=NidalheimResampleBlendSpace`).
+
+## `NidalheimAddAimSpinePitch`
+
+Le plus lourd des quatre : c'est une vraie **chirurgie de graphe AnimBP**. Il charge
+`ABP_Unarmed` (le parent de tous les AnimBP d'armes) et, s'il n'y est pas déjà :
+
+1. crée une variable membre `FRotator` nommée `AimSpineRotation` (écrite chaque frame côté C++
+   par `NidalheimPlayerCharacter::Tick` pendant la visée) ;
+2. localise l'AnimGraph principal en repérant le nœud `Root` ;
+3. insère, juste avant le `Root`, un `LocalToComponentSpace` -> 3 `ModifyBone` -> `ComponentToLocalSpace` ;
+4. configure chaque `ModifyBone` sur `spine_02`, `spine_03`, `spine_04` en rotation **additive**
+   (`BMM_Additive`) en `BCS_ComponentSpace`, expose la pin `Rotation` (équivalent de la case
+   « As Pin ») et la branche sur un getter unique de la variable ;
+5. marque le Blueprint modifié, le recompile et le resauve.
+
+Le commandlet est **idempotent** : si `AimSpineRotation` existe déjà, il considère le graphe en place
+et passe directement à l'étape suivante. En fin de course, il recompile et resauve les AnimBP enfants
+(`ABP_Bow`, `ABP_Sword`, `ABP_Staff`) pour qu'ils héritent du nouveau graphe sans recompilation au chargement.
+
+Pas d'argument de ligne de commande : tous les chemins d'assets sont codés en dur.
+
+```bash
+UnrealEditor-Cmd.exe Nidalheim.uproject -run=NidalheimAddAimSpinePitch
+```
+
+```cpp
+// Cœur de l'injection : 3 ModifyBone additifs en component space, un par vertèbre.
+const FName SpineBones[] = { TEXT("spine_02"), TEXT("spine_03"), TEXT("spine_04") };
+// ...
+Modify->Node.BoneToModify.BoneName = SpineBones[Index];
+Modify->Node.TranslationMode = BMM_Ignore;
+Modify->Node.RotationMode    = BMM_Additive;
+Modify->Node.ScaleMode       = BMM_Ignore;
+Modify->Node.RotationSpace   = BCS_ComponentSpace;
+```
+
+## `NidalheimResampleBlendSpace`
+
+Reconstruit la triangulation runtime (`BlendSpaceData`) d'un BlendSpace, puis resauve. C'est
+exactement le rebuild (`ValidateSampleData()` + `ResampleData()`) que l'éditeur Persona effectue à
+chaque édition de sample. Nécessaire quand les samples ont été modifiés **hors** de Persona : la
+triangulation sérialisée conserve alors des index de samples périmés, ce qui provoque un crash
+« Array index out of bounds » à la première évaluation d'animation.
+
+Argument requis : `-Asset=` (chemin du BlendSpace). Sans lui, le commandlet log une erreur et renvoie `1`.
+
+```bash
+UnrealEditor-Cmd.exe Nidalheim.uproject -run=NidalheimResampleBlendSpace -Asset=/Game/Chemin/Vers/BS_X
+```
+
+```cpp
+// Le rebuild que fait Persona à chaque édition de sample : validation + retriangulation.
+BlendSpace->ValidateSampleData();
+BlendSpace->ResampleData();
+```
+
+## `NidalheimRestoreStaffSockets`
+
+Restaure sur `SKM_Quinn_Simple` deux sockets — `staff_stowed_socket` (sur `spine_03`) et
+`staff_equipped_socket` (sur `hand_r`) — avec les transforms **exacts** de `SK_Mannequin#6`. Le
+réimport du mesh (`#7`, change 143) les avait effacés, ce qui faisait s'attacher le bâton rangé à la
+racine du mesh. Le commandlet est inaccessible en Python car `USkeletalMeshSocket::SocketName` est
+`BlueprintReadOnly`. Il est idempotent socket par socket (skip si le socket existe déjà).
+
+En complément, il active `bUsedWithSkeletalMesh` sur le matériau parent
+`MM_MasterMaterialLeartesStudios` (sans quoi `SK_Bow`, un mesh squelettique, rendrait le matériau en
+gris par défaut).
+
+Pas d'argument de ligne de commande : chemins et transforms sont codés en dur.
+
+```bash
+UnrealEditor-Cmd.exe Nidalheim.uproject -run=NidalheimRestoreStaffSockets
+```
+
+## `NidalheimSetMontageSlot`
+
+Change le `SlotName` des pistes (`SlotAnimTracks`) d'un ou plusieurs AnimMontage — propriété non
+exposée à l'API Python. Sert notamment à basculer les montages plein-corps sur le slot `UpperBody`
+d'`ABP_Unarmed` (`LayeredBoneBlend` sur `spine_02`) afin de garder les jambes en locomotion pendant
+l'action.
+
+Arguments requis : `-Montages=` (liste de chemins séparés par des virgules) et `-Slot=` (nom du slot
+cible). Le commandlet refuse — et ne sauve pas — dans deux cas de sécurité :
+
+- le montage a plus d'une piste (`SlotAnimTracks.Num() > 1`) : renommer toutes les pistes au même
+  slot créerait des doublons invalides ; cas à traiter manuellement ;
+- le slot n'existe pas sur le skeleton du montage (`Skeleton->ContainsSlotName` faux) : sinon le
+  montage deviendrait muet **en silence** au runtime, sans warning moteur.
+
+```bash
+UnrealEditor-Cmd.exe Nidalheim.uproject -run=NidalheimSetMontageSlot -Montages=/Game/A,/Game/B -Slot=UpperBody
+```
+
+## Pourquoi `if (Target.bBuildEditor)` dans `Build.cs`
+
+Ces commandlets manipulent des types qui ne vivent que dans des modules **éditeur** : édition de
+graphe AnimBP (`AnimGraphNode_*`, `UAnimationGraphSchema`), réflexion/utilitaires Blueprint
+(`FBlueprintEditorUtils`, `FKismetEditorUtilities`, `UK2Node_VariableGet`), et sauvegarde de packages
+via `UnrealEd`. Ces modules ne sont pas présents dans une build game.
+
+`Nidalheim.Build.cs` ne lie donc `UnrealEd`, `AnimGraph` et `BlueprintGraph` que lorsque la cible est
+un build éditeur :
+
+```cpp
+// Modules éditeur pour les commandlets de maintenance d'assets (chirurgie de graphe
+// AnimBP : NidalheimAddAimSpinePitch). Jamais linkés dans les builds game/client.
+if (Target.bBuildEditor)
+{
+    PrivateDependencyModuleNames.AddRange(new string[] {
+        "UnrealEd",
+        "AnimGraph",
+        "BlueprintGraph"
+    });
+}
+```
+
+Cela explique la double protection : le gating `Target.bBuildEditor` au niveau du **link** (sinon une
+build packagée ne compilerait même pas, faute de modules), et le `#if WITH_EDITOR` dans chaque `.cpp`
+qui neutralise le code au niveau du **compilateur**. Les deux convergent : ces outils n'existent que
+dans l'éditeur.
+
+## Lien avec le module `NidalheimEditor`
+
+Ces quatre commandlets vivent dans le module **runtime** `Nidalheim` (sous `System/`), gardés par
+`bBuildEditor`. Le projet possède par ailleurs un module proprement éditeur **séparé**,
+`NidalheimEditor` (`client/Source/NidalheimEditor/`), qui regroupe d'autres commandlets de maintenance
+d'assets : terrain flatten (`NidalheimTerrainFlatten*`), Nanite (`NidalheimEnableNanite*`,
+`FixNaniteMaterialUsage*`), set character mesh, vertex colors, probes, add actor tag. Ce module dépend
+lui aussi de `UnrealEd` et n'est jamais lié en build game. Les commandlets décrits ici en sont le
+pendant côté module runtime, regroupés là parce qu'ils visent des assets d'animation/personnage
+proches du code gameplay.
+
+## Voir aussi
+
+- [Vue d'ensemble Unreal Engine](/docs/unreal-engine/overview)
+- [Perforce](/docs/unreal-engine/perforce)
