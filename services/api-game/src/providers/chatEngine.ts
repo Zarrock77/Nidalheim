@@ -31,6 +31,17 @@ export interface ChatRespondOptions {
  * ("<function=name>{args}</function>") au lieu d'un tool_call structure. On l'extrait pour en
  * faire un VRAI tool_call (l'outil s'execute), et on renvoie le texte debarrasse du fragment.
  */
+// Echappatoire de la decision forcee (tool_choice required) : le modele DOIT choisir un outil,
+// no_action = "rien a faire ce tour". Jamais transmis au onToolCall.
+const NO_ACTION_TOOL: SdkTool = {
+  type: "function",
+  function: {
+    name: "no_action",
+    description: "A appeler quand aucun autre outil n'est pertinent pour ce tour.",
+    parameters: { type: "object", properties: {}, required: [] },
+  },
+};
+
 function extractTextToolCalls(content: string): { calls: SdkToolCall[]; cleaned: string } {
   const re = /<function\s*=\s*"?([a-zA-Z0-9_.-]+)"?\s*>([\s\S]*?)<\/function\s*>/gi;
   const calls: SdkToolCall[] = [];
@@ -138,7 +149,14 @@ export class ChatEngine {
 
     // Phase 1 — DECISION (texte ignore). Le modele appelle 0..n tools ; on les execute.
     if (useTools) {
-      const { toolCalls } = await this._callOnce(client, model, msgs, opts.tools, false, undefined);
+      // Decision FORCEE : tool_choice required + no_action -> le modele choisit toujours
+      // explicitement (Llama partait parfois en prose sans rien appeler).
+      const decisionMsgs: SdkMessage[] = [
+        ...msgs,
+        { role: "system", content: "PHASE DE DECISION (interne, le joueur ne voit rien) : appelle le ou les outils pertinents pour le dernier message du joueur, en suivant les regles du prompt. Si aucun outil n'est utile ce tour, appelle no_action." },
+      ];
+      const { toolCalls: rawCalls } = await this._callOnce(client, model, decisionMsgs, [...opts.tools!, NO_ACTION_TOOL], false, undefined, "required");
+      const toolCalls = rawCalls.filter((tc) => tc.type !== "function" || tc.function.name !== "no_action");
       if (toolCalls.length) {
         msgs.push({ role: "assistant", content: null, tool_calls: toolCalls });
         for (const tc of toolCalls) {
@@ -166,9 +184,10 @@ export class ChatEngine {
     tools: SdkTool[] | undefined,
     stream: boolean,
     onDelta?: (delta: string) => void,
+    toolChoice?: "required",
   ): Promise<{ text: string; toolCalls: SdkToolCall[] }> {
     if (stream) {
-      const s = await client.chat.completions.create({ model, messages: msgs, tools, stream: true });
+      const s = await client.chat.completions.create({ model, messages: msgs, tools, stream: true, temperature: 0, seed: 7 });
       let full = "";
       const acc: Record<number, { id: string; name: string; args: string }> = {};
       for await (const chunk of s) {
@@ -191,7 +210,7 @@ export class ChatEngine {
       return normalizeToolCalls(full, toolCalls);
     }
 
-    const res = await client.chat.completions.create({ model, messages: msgs, tools });
+    const res = await client.chat.completions.create({ model, messages: msgs, tools, temperature: 0, seed: 7, ...(toolChoice ? { tool_choice: toolChoice } : {}) });
     const m = res.choices[0]?.message;
     return normalizeToolCalls(m?.content ?? "", (m?.tool_calls ?? []) as SdkToolCall[]);
   }

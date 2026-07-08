@@ -57,7 +57,7 @@ export function buildSystemPrompt(
         );
       } else {
         lines.push(
-          "  PRESENTER CETTE EPREUVE = LA CONFIER : des que la conversation s'y prete (le joueur demande quoi faire, veut entrer au village, propose son aide, ou te questionne sur l'epreuve), appelle l'outil start_mission PUIS presente-la brievement. N'attends pas une acceptation explicite, et ne decris jamais l'epreuve sans avoir appele l'outil. Si le joueur porte ou mentionne l'objet de cette epreuve, confie-la IMMEDIATEMENT (meme outil) puis verifie et valide dans la foulee. Et si le joueur te montre ou mentionne N'IMPORTE quel butin du donjon alors qu'une epreuve n'est pas encore confiee : reagis (lore) PUIS enchaine en confiant cette epreuve dans le MEME tour (outil start_mission).",
+          "  PRESENTER CETTE EPREUVE = LA CONFIER : des que la conversation s'y prete (le joueur demande quoi faire, veut entrer au village, propose son aide, ou te questionne sur l'epreuve), declenche l'outil prevu pour confier une epreuve PUIS presente-la brievement. N'attends pas une acceptation explicite, et ne decris jamais l'epreuve sans avoir appele l'outil. Si le joueur porte ou mentionne l'objet de cette epreuve, confie-la IMMEDIATEMENT (meme outil) puis verifie et valide dans la foulee. Et si le joueur te montre ou mentionne N'IMPORTE quel butin du donjon alors qu'une epreuve n'est pas encore confiee : reagis (lore) PUIS enchaine en confiant cette epreuve dans le MEME tour (meme outil de confie).",
         );
       }
     }

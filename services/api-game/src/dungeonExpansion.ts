@@ -232,7 +232,7 @@ export async function generateDungeonExtension(planRaw: unknown, items: CatalogI
             { role: "user", content: prompt },
           ],
           response_format: { type: "json_object" },
-          temperature: 0.8,
+          temperature: 0, // deterministe : meme etat -> meme extension (fiabilite demo)
         });
         const text = res.choices[0]?.message?.content ?? "";
         let parsed: AnyObj;
