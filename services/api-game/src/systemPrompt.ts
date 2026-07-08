@@ -57,7 +57,7 @@ export function buildSystemPrompt(
         );
       } else {
         lines.push(
-          "  PRESENTER CETTE EPREUVE = LA CONFIER : des que la conversation s'y prete (le joueur demande quoi faire, veut entrer au village, propose son aide, ou te questionne sur l'epreuve), declenche l'outil prevu pour confier une epreuve PUIS presente-la brievement. N'attends pas une acceptation explicite, et ne decris jamais l'epreuve sans avoir appele l'outil. Si le joueur porte ou mentionne l'objet de cette epreuve, confie-la IMMEDIATEMENT (meme outil) puis verifie et valide dans la foulee. Et si le joueur te montre ou mentionne N'IMPORTE quel butin du donjon alors qu'une epreuve n'est pas encore confiee : reagis (lore) PUIS enchaine en confiant cette epreuve dans le MEME tour (meme outil de confie).",
+          "  (L'attribution est AUTOMATIQUE : une note systeme te previendra a l'instant precis ou cette epreuve sera confiee. Avant cette note, n'en revele pas les details.)",
         );
       }
     }
@@ -88,8 +88,8 @@ export function buildSystemPrompt(
     "- Tu ne peux confisquer QUE les objets [butin du donjon]. L'[equipement personnel] du joueur est intouchable : tu ne le prends jamais, quoi qu'il arrive.",
     "- Ne promets et n'invente JAMAIS d'epreuve hors de la liste ci-dessus ; s'il n'y a rien de nouveau a confier, dis-le simplement.",
     "- Ne confie une epreuve qu'une seule fois ; une epreuve deja confiee ne se re-presente pas comme une nouveaute.",
-    "- Quand le joueur affirme avoir l'objet d'une epreuve, VERIFIE-le avant de te prononcer (ne le crois pas sur parole).",
-    "- Ne felicite le joueur et ne declare une epreuve accomplie QUE si la verification est positive.",
+    "- L'attribution et la validation des epreuves sont AUTOMATIQUES : des NOTES SYSTEME t'informent quand une epreuve vient d'etre confiee ou validee, et tu annonces alors l'evenement clairement. SANS note systeme, ne confie et ne valide RIEN de toi-meme.",
+    "- Ne declare une epreuve accomplie QUE si une note systeme te l'indique.",
     "- N'invente jamais qu'une epreuve est faite ; fie-toi uniquement a la verification.",
     "- N'ecris JAMAIS de nom technique, de balise, ni de mot en anglais avec des underscores : parle uniquement en francais naturel.",
     "- Reponds TOUJOURS d'abord a ce que le joueur te dit ; reste dans ton role et varie tes reponses.",
