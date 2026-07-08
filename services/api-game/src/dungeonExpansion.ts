@@ -217,21 +217,21 @@ export async function generateDungeonExtension(planRaw: unknown, items: CatalogI
   const wave = asArray(plan.missions).length + 1;
   const prompt = buildPrompt(plan, items, anchors, wave);
 
-  // Providers : Groq (primaire) puis OpenAI (secours), comme le chat.
+  // Providers : OpenAI (primaire, fiable sur le schema) puis Groq (secours), comme le chat.
   const providers: Array<{ client: OpenAI; model: string; label: string }> = [];
+  if (process.env.OPENAI_API_KEY) {
+    providers.push({
+      client: new OpenAI({ apiKey: process.env.OPENAI_API_KEY }),
+      model: process.env.OPENAI_FALLBACK_MODEL || "gpt-5.4-mini",
+      label: "openai",
+    });
+  }
   const groqKey = process.env.LLM_API_KEY || process.env.GROQ_API_KEY;
   if (groqKey) {
     providers.push({
       client: new OpenAI({ apiKey: groqKey, baseURL: process.env.LLM_BASE_URL || "https://api.groq.com/openai/v1" }),
       model: process.env.DUNGEON_LLM_MODEL || process.env.CHAT_LLM_MODEL || "llama-3.3-70b-versatile",
       label: "groq",
-    });
-  }
-  if (process.env.OPENAI_API_KEY) {
-    providers.push({
-      client: new OpenAI({ apiKey: process.env.OPENAI_API_KEY }),
-      model: process.env.OPENAI_FALLBACK_MODEL || "gpt-4o-mini",
-      label: "openai",
     });
   }
   if (providers.length === 0) return { ok: false, error: "aucune cle LLM configuree" };

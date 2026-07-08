@@ -97,16 +97,18 @@ export class ChatEngine {
       : null;
     this.openai = cfg.openaiApiKey ? new OpenAI({ apiKey: cfg.openaiApiKey }) : null;
     this.groqModel = cfg.groqModel || "llama-3.1-8b-instant";
-    this.openaiModel = cfg.openaiModel || process.env.OPENAI_FALLBACK_MODEL || "gpt-4o-mini";
+    this.openaiModel = cfg.openaiModel || process.env.OPENAI_FALLBACK_MODEL || "gpt-5.4-mini";
     if (!this.groq && !this.openai) {
       throw new Error("ChatEngine: aucun provider LLM configure (ni Groq ni OpenAI)");
     }
   }
 
   async respond(messages: ChatPromptMessage[], opts: ChatRespondOptions = {}): Promise<string> {
+    // OpenAI en PRIMAIRE (tool-calling fiable, pas de rate-limit agressif, temperature 0 + seed
+    // supportes) ; Groq en secours (rapide mais Llama flanche sur les outils et le tier rate-limite).
     const providers: Array<{ label: string; client: OpenAI; model: string }> = [];
-    if (this.groq) providers.push({ label: "groq", client: this.groq, model: opts.model || this.groqModel });
     if (this.openai) providers.push({ label: "openai", client: this.openai, model: this.openaiModel });
+    if (this.groq) providers.push({ label: "groq", client: this.groq, model: opts.model || this.groqModel });
 
     let lastErr: unknown;
     for (const p of providers) {
