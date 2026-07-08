@@ -4,7 +4,7 @@ title: Aperçu
 
 # Backend — Aperçu
 
-Monorepo backend de **Nidalheim**. Cinq services Docker derrière un nginx reverse-proxy, déployés sur un VPS via une CI registry-based (GitHub Actions → GHCR → SSH). Auth JWT HS256 partagée, API WebSocket temps-réel pour les PNJ pilotés par IA, deux frontends Next.js (vitrine publique + docs interne admin-only), Postgres + Redis pour la persistance.
+Monorepo backend de **Nidalheim**. Cinq services Docker derrière un nginx reverse-proxy, déployés sur un VPS via une CI registry-based (GitHub Actions → GHCR → SSH). Auth JWT HS256 partagée, API WebSocket temps-réel pour les PNJ pilotés par IA, deux frontends Next.js (vitrine publique + docs interne admin-only), Postgres pour la persistance.
 
 ## Layout du repo
 
@@ -31,12 +31,12 @@ Pas de workspace racine — chaque service installe ses deps localement (mix `pn
 | Service | Stack | Port (interne) | Rôle |
 |---------|-------|----------------|------|
 | `api-auth` | Express 5 + TS + npm | `3001` | Auth REST. Register, login, refresh, logout. Device Authorization Grant pour le client UE5. |
-| `api-game` | `ws` + JS ESM + pnpm | `3002` | WebSocket `/text` (chat LLM) et `/audio` (voice streaming Deepgram → Groq → Cartesia). |
+| `api-game` | `ws` + TypeScript ESM + pnpm | `3002` | WebSocket `/text` (chat LLM + missions du donjon) et `/audio` (voice streaming Deepgram → OpenAI → Cartesia). |
 | `db` | Drizzle + tsx + pnpm | — | Schéma Postgres + migrations. Container one-shot, pas de runtime. |
 | `site` | Next.js 16 + pnpm | `3000` | Site vitrine, register/login UI, page `/device` du Device flow. |
 | `docs` | Nextra 4 + NextAuth + pnpm | `3000` | Documentation interne admin-only (callback `role === "admin"`). |
 
-Plus deux services d'infra : **Postgres 16** (users, profiles, chat history, npcs) et **Redis 7** (refresh tokens avec rotation, état Device flow).
+Plus un service d'infra : **Postgres 16** (users, profiles, chat history, npcs, sessions device flow + refresh tokens).
 
 ## Flux principaux (vue 30 000 ft)
 
@@ -56,7 +56,7 @@ Plus deux services d'infra : **Postgres 16** (users, profiles, chat history, npc
         ┌───────────────┼─────────────────┐
         ▼               ▼                 ▼
   ┌──────────┐   ┌────────────┐   ┌──────────────┐
-  │ Postgres │   │  Deepgram  │   │ Groq + TTS   │
+  │ Postgres │   │  Deepgram  │   │ OpenAI + TTS │
   │ (history)│   │   (STT)    │   │ (LLM + voice)│
   └──────────┘   └────────────┘   └──────────────┘
 ```
@@ -76,8 +76,8 @@ JWT **HS256** avec `JWT_SECRET` partagé entre `api-auth` (mint) et `api-game` (
 | Runtime | Node.js 22, TypeScript (auth, db, site, docs), JS ESM (game) |
 | Backend | Express 5, `ws`, `pg`, `ioredis`, `bcrypt` |
 | Frontend | Next.js 16 App Router, React 19, Tailwind 4, Nextra 4, NextAuth 5 |
-| DB | PostgreSQL 16 + Drizzle ORM, Redis 7 |
-| IA | Groq (Llama 3.1 8B / 3.3 70B), Deepgram STT, Cartesia TTS, ElevenLabs TTS (fallback) |
+| DB | PostgreSQL 16 + Drizzle ORM |
+| IA | OpenAI `gpt-5.4-mini` (secours Groq Llama 3.3 70B), Deepgram STT, Cartesia TTS, ElevenLabs TTS (fallback) |
 | Infra | Docker Compose, Nginx, Let's Encrypt + Certbot, GitHub Actions, GHCR |
 
 ## Par où commencer

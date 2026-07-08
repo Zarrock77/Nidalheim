@@ -11,8 +11,8 @@ Guide pas à pas pour lancer l'ensemble du backend Nidalheim sur ta machine.
 - **Node.js 22+**
 - **pnpm 10+** (pour `services/site`, `services/docs`, `services/api-game`, `services/db`)
 - **npm** (pour `services/api-auth`)
-- **Docker Desktop** (Postgres + Redis + nginx + tous les services en prod)
-- Un compte sur les providers IA : [Groq](https://console.groq.com), [Deepgram](https://deepgram.com), [Cartesia](https://cartesia.ai), optionnellement [ElevenLabs](https://elevenlabs.io)
+- **Docker Desktop** (Postgres + nginx + tous les services en prod)
+- Un compte sur les providers IA : [OpenAI](https://platform.openai.com) (LLM primaire), [Deepgram](https://deepgram.com), [Cartesia](https://cartesia.ai), optionnellement [Groq](https://console.groq.com) (LLM de secours) et [ElevenLabs](https://elevenlabs.io)
 
 ## 1 — Cloner + configurer
 
@@ -38,13 +38,14 @@ JWT_SECRET=$(openssl rand -base64 64)   # HS256 partagé api-auth ↔ api-game
 # IA
 OPENAI_API_KEY=sk-...       # fallback, rarement utilisé en pratique
 DEEPGRAM_API_KEY=...        # voice STT
-LLM_API_KEY=gsk_...         # clé Groq (text + voice LLM)
+OPENAI_API_KEY=sk-...       # LLM primaire (chat, voice, expansion du donjon)
+LLM_API_KEY=gsk_...         # clé Groq (LLM de secours)
 TTS_PROVIDER=cartesia
 CARTESIA_API_KEY=sk_car_...
 CARTESIA_VOICE_ID=...       # voix française recommandée
 ```
 
-## 2 — Lancer Postgres + Redis
+## 2 — Lancer Postgres
 
 ```bash
 cd infra
@@ -126,7 +127,6 @@ cd services/db && pnpm studio
 | 3002 | `api-game` (WebSocket) |
 | 3004 | `services/docs` (Next.js dev, port custom) |
 | 5432 | Postgres |
-| 6379 | Redis |
 
 ## Dépannage
 

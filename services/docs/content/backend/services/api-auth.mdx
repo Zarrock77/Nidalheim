@@ -57,7 +57,7 @@ Identifiant accepté : **username OU email** (le champ s'appelle `username` mais
 
 ### `POST /refresh`
 
-Rotation du refresh token : l'ancien est révoqué dans Redis, un nouveau couple est émis.
+Rotation du refresh token : l'ancienne ligne `refresh_tokens` est supprimée, un nouveau couple est émis.
 
 **Requête** : `{ refreshToken }`
 
@@ -67,7 +67,7 @@ Rotation du refresh token : l'ancien est révoqué dans Redis, un nouveau couple
 
 ### `POST /logout`
 
-Révoque le refresh token côté Redis. Idempotent : même avec un token invalide, renvoie `200`.
+Révoque le refresh token (delete Postgres). Idempotent : même avec un token invalide, renvoie `200`.
 
 **Requête** : `{ refreshToken }`
 
@@ -135,20 +135,22 @@ Appelé quand le user clique le bouton **Approve** sur la page `/device`.
 
 **Réponse 200** : `{ "status": "approved" }`
 
-Mint un **nouveau couple de tokens** pour la session device (séparés du couple utilisé pour le web), les stocke dans le record Redis. Le poll `/device/token` suivant les renvoie au client UE5.
+Mint un **nouveau couple de tokens** pour la session device (séparés du couple utilisé pour le web), les stocke dans le record `device_codes`. Le poll `/device/token` suivant les renvoie au client UE5.
 
 ### `POST /device/deny` *(Bearer auth)*
 
 Symétrique d'`approve`. Marque le record comme `denied`. Le poll `/device/token` suivant retournera `access_denied`.
 
-### Stockage Redis
+### Stockage Postgres (`device_codes`)
 
-| Key | Valeur | TTL |
-|-----|--------|-----|
-| `device:<device_code>` | JSON `{ status, user_code, expires_at, [user, access_token, refresh_token] }` | 600s |
-| `usercode:<user_code>` | `<device_code>` (réverse lookup pour la page web) | 600s |
+| Colonne | Rôle |
+|---------|------|
+| `device_code` (PK) | identifiant secret pollé par le client UE5 |
+| `user_code` (unique) | code court affiché au joueur (réverse lookup pour la page web) |
+| `data` (jsonb) | `{ status, [user, access_token, refresh_token] }` |
+| `expires_at` | expiration (~10 min), filtrée à la lecture |
 
-Le record est **consommé** (DELETE Redis) au premier `/device/token` qui retourne 200 — pas de rejeu possible.
+Le record est **consommé** (DELETE) au premier `/device/token` qui retourne 200 — pas de rejeu possible.
 
 ## JWT
 
@@ -180,7 +182,7 @@ Le record est **consommé** (DELETE Redis) au premier `/device/token` qui retour
 }
 ```
 
-Le `tokenId` est stocké en Redis sous `refresh:<userId>:<tokenId>` avec TTL 7j. Refresh = vérif du JWT + check Redis + delete + insert nouveau couple.
+Le `tokenId` est stocké en Postgres (table `refresh_tokens`, PK `(user_id, token_id)`, `expires_at` +7j). Refresh = vérif du JWT + check + delete + insert du nouveau couple.
 
 ## Flow d'auth côté UE5
 
@@ -226,6 +228,7 @@ services/api-auth/src/
     ├── jwt.ts              # signAccessToken, signRefreshToken, verifyToken (HS256)
     ├── user.ts             # createUser, authenticateUser, getUserById
     ├── redis.ts            # store/isValid/revoke refresh tokens
-    ├── devices.ts          # Redis-backed device records, user_code generation
+    ├── devices.ts          # device records (Postgres), user_code generation
+    ├── sessions.ts         # tables device_codes + refresh_tokens (pool pg)
     └── db.ts               # Pool pg avec DATABASE_URL
 ```

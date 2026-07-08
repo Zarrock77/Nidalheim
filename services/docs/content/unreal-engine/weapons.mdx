@@ -6,8 +6,6 @@ title: Armes & projectiles
 
 Le système d'armes vit dans `Source/Nidalheim/Weapons/`. Une arme est un `AActor` répliqué (`ANidalheimWeaponBase`) porté par un personnage, géré par un composant (`UNidalheimWeaponsManagerComponent`) qui spawn, attache et bascule les armes. Les capacités de combat (mêlée, tir) sont des abilities GAS qui se *gate* sur l'arme équipée via un `FGameplayTag` d'identité.
 
-> ⚠️ **Divergence avec la doc EIP** : le document `Nidalheim_Context_Cowork.docx` décrit un schéma `AC_AIBrain` / REST. Ce qui suit décrit l'implémentation réelle (armes + GAS), indépendante de la chaîne IA des PNJ.
-
 ## Vue d'ensemble
 
 | Arme | Classe | Tag d'identité | Ability associée | Projectile |

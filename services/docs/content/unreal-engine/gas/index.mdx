@@ -6,8 +6,6 @@ title: Gameplay Ability System
 
 Le projet utilise une stack GAS Epic standard, entièrement en C++, sous la convention de nommage `Nidalheim*`. Tout part de `ANidalheimCharacterBase` (l'ASC, les attribute sets, les abilities de départ) et de son ASC dérivé `UNidalheimAbilitySystemComponent`.
 
-> ⚠️ **Divergence avec l'archi EIP documentée.** Le document `Nidalheim_Context_Cowork.docx` décrit un `AC_AIBrain` (HTTP REST vers une API IA) et un GAS principalement piloté en Blueprint (`BP_NPC_AI`). L'implémentation réelle est différente : GAS **100% C++** sous convention `Nidalheim*`, sans `AC_AIBrain`. L'IA conversationnelle des PNJ passe par WebSocket vers `api-game` (voir [NPCCharacter](/docs/unreal-engine/characters/npc)), pas par un component GAS. Suivre le code réel quand on touche à l'implémentation.
-
 ## La stack GAS du projet
 
 ```
