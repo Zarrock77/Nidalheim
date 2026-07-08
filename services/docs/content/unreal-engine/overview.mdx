@@ -11,8 +11,6 @@ Le client jeu Unreal Engine 5.6 (`Nidalheim.uproject`) vit dans un **depot Perfo
 
 Le module de gameplay est entièrement en **C++** (convention `Nidalheim*`), les Blueprints ne portant que la config visuelle, l'input, les animations et les callbacks.
 
-> ⚠️ **Divergence avec l'archi EIP documentée.** Le document de contexte Cowork décrit un `AC_AIBrain` (Actor Component faisant des appels REST IA + TTS) et un GAS en Blueprint. L'**implémentation réelle** diverge : le GAS est **100 % C++**, et toute l'IA (LLM + STT + TTS + génération de quête) passe par `api-game` via WebSocket — pas d'appel REST direct UE5 → LLM/TTS, pas d'`AC_AIBrain`. Cette doc décrit le code réel.
-
 ## Source layout (`Source/Nidalheim/`)
 
 Organisation **Lyra-style** par domaine fonctionnel — pas par classe UE.
@@ -121,7 +119,7 @@ Toute modification de protocole doit être appliquée des **deux côtés** :
 | Query params WebSocket | `services/api-game/src/server.js` | `BuildWsUrl` dans `NidalheimNPCCharacter.cpp` |
 | Endpoints device flow | `services/api-auth/src/routes/device.ts` | `FNidalheimAuthClient` |
 | Schema `npcs` | `services/db/src/schema/npcs.ts` + migration | `NpcId` UPROPERTY (juste un FString, pas de breaking) |
-| Format de quête (`quest_offer`) | `services/api-game` (`QuestGenerator`) | `UNidalheimQuestSubsystem` (réception JSON) |
+| Protocole missions (`mission_sync`, events) | `services/api-game` (`missionState`/`missionTool`) | `ANidalheimNPCCharacter` + `UNidalheimQuestSubsystem` |
 | `JWT_SECRET` rotation | Mettre à jour `infra/.env` sur les deux services | Force re-login (tous les access tokens existants invalidés) |
 
 ## Liens internes

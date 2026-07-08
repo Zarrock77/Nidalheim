@@ -20,7 +20,7 @@ La staging ne build pas d'images Docker. Elle tourne en process host avec les sc
 | `main` | Docker Compose | `~/Nidalheim` | `${POSTGRES_DB}` | `*.nidalheim.com` |
 | `staging` | scripts dev lances manuellement | `~/Nidalheim-staging` | `${POSTGRES_DB}_staging` | `*-staging.nidalheim.com` |
 
-La prod et la staging partagent le meme VPS, le meme Postgres Docker et le meme Redis Docker, mais pas la meme base Postgres. La staging utilise Redis DB 1 dans `api-auth/start-staging.sh`.
+La prod et la staging partagent le meme VPS et le meme Postgres Docker, mais pas la meme base : la staging utilise `nidalheim_staging`.
 
 ## Production (`main`)
 
@@ -191,7 +191,7 @@ Secrets applicatifs ecrits dans `infra/.env` :
 Valeurs hardcodees dans le workflow :
 
 - `LLM_BASE_URL=https://api.groq.com/openai/v1`
-- `LLM_MODEL=llama-3.1-8b-instant`
+- `OPENAI_API_KEY=sk-...` (LLM primaire) et `LLM_API_KEY=gsk_...` (secours Groq)
 - `TTS_PROVIDER=cartesia`
 
 ## Commandes utiles
