@@ -174,7 +174,13 @@ export class ChatEngine {
 
     // Phase 2 — DIALOGUE joueur, SANS tool (aucune fuite possible), streame vers le TTS si demande.
     const { text } = await this._callOnce(client, model, msgs, undefined, opts.stream === true, onDelta);
-    return text;
+    if (text.trim()) { return text; }
+
+    // Garde-fou : a temperature 0, Llama renvoie parfois un texte VIDE apres des messages tool
+    // (le PNJ "prend l'objet sans rien dire"). Une relance avec consigne explicite suffit.
+    msgs.push({ role: "system", content: "Ta reponse etait vide. Reponds au joueur MAINTENANT en 1-2 phrases courtes, dans ton role, en tenant compte des resultats d'outils ci-dessus." });
+    const retry = await this._callOnce(client, model, msgs, undefined, opts.stream === true, onDelta);
+    return retry.text;
   }
 
   private async _callOnce(

@@ -65,6 +65,21 @@ function computeAnchors(plan: AnyObj): string[] {
   return [...anchors];
 }
 
+/** Vue COMPACTE du plan pour le prompt : structure + etat de pillage, sans les gros textes
+ * (missionPrompt/lore/descriptions) -> prompt bien plus court, moins de rate-limit. */
+function compactPlanView(plan: AnyObj): AnyObj {
+  return {
+    nodes: asArray(plan.nodes).map((n) => ({ id: n.id, role: n.role })),
+    links: asArray(plan.links).map((l) => ({ from: l.from, to: l.to, gateLockId: l.gateLockId ?? "" })),
+    keys: asArray(plan.keys).map((k) => ({ lockId: k.lockId, nodeId: k.nodeId })),
+    missions: asArray(plan.missions).map((m) => ({
+      id: m.id, objectiveItemId: m.objectiveItemId, objectiveNodeId: m.objectiveNodeId, completed: m.completed === true,
+    })),
+    secrets: asArray(plan.secrets).map((x) => ({ id: x.id, itemId: x.itemId, nodeId: x.nodeId, collected: x.collected === true })),
+    encounters: asArray(plan.encounters).map((e) => ({ nodeId: e.nodeId, budget: e.budget })),
+  };
+}
+
 function buildPrompt(plan: AnyObj, items: CatalogItem[], anchors: string[], wave: number): string {
   const nodeIds = asArray(plan.nodes).map((n) => str(n.id)).filter(Boolean);
   const lockIds = asArray(plan.keys).map((k) => str(k.lockId)).filter(Boolean);
@@ -76,8 +91,8 @@ function buildPrompt(plan: AnyObj, items: CatalogItem[], anchors: string[], wave
     "Tu es le generateur de donjon du jeu Nidalheim (dark fantasy nordique).",
     "LORE : les occupants du donjon sont des PILLEURS qui cachent leur butin vole. Le joueur vient de recuperer des objets dans certaines salles ; les pilleurs s'en rendent compte, CREUSENT de nouvelles salles plus profondes derriere ces salles pour securiser le reste du butin, et y postent des gardes.",
     "",
-    "PLAN ACTUEL DU DONJON (JSON, ne le repete pas) :",
-    JSON.stringify(plan),
+    "PLAN ACTUEL DU DONJON (structure, JSON, ne le repete pas) :",
+    JSON.stringify(compactPlanView(plan)),
     "",
     `SALLES ANCRES (pillees par le joueur, tu DOIS accrocher les nouvelles salles derriere L'UNE d'elles) : ${anchors.join(", ")}`,
     `ITEMS UTILISABLES (seuls itemId/objectiveItemId autorises) : ${items.map((i) => `${i.id} (${i.name})`).join(", ")}`,
@@ -96,7 +111,7 @@ function buildPrompt(plan: AnyObj, items: CatalogItem[], anchors: string[], wave
     "",
     "CONTRAINTES STRICTES :",
     "- 2 ou 3 nouvelles salles, en CHAINE derriere UNE salle ancre : premier lien { from: <ancre>, to: <nouvelle salle 1> }, puis salle 1 -> salle 2, etc.",
-    "- La salle la plus profonde a le role Objective et porte l'objectif de la nouvelle mission (objectiveNodeId).",
+    "- La salle la plus profonde a le role Objective et porte l'objectif de la nouvelle mission : objectiveNodeId = l'id de CETTE NOUVELLE salle (jamais une salle deja existante du plan).",
     "- Verrouille le PREMIER lien (celui qui part de l'ancre) avec un nouveau gateLockId. Ajoute UNE entree keys pour ce lock : le gardien porteur est poste dans la salle ANCRE (nodeId = l'ancre), c'est un pilleur qui garde le chantier.",
     "- Les autres liens ont gateLockId vide (\"\").",
     "- EXACTEMENT 1 mission, ENCHAINEE narrativement avec le butin deja recupere par le joueur (missions accomplies et secrets collected=true du plan) : la description et le missionPrompt y font reference. objectiveItemId parmi les items autorises, mais JAMAIS l'objet d'une mission precedente (varie les objectifs). name court. objectiveItemName = nom affiche de l'objet. objectiveDescription = 1-2 phrases (ce qu'il faut recuperer et ou). missionPrompt = consigne de role pour Olaf le gardien du village (3-4 phrases : coherent avec le lore pilleurs, il demande de rapporter l'objet, ferme mais bienveillant).",
@@ -221,39 +236,53 @@ export async function generateDungeonExtension(planRaw: unknown, items: CatalogI
   }
   if (providers.length === 0) return { ok: false, error: "aucune cle LLM configuree" };
 
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
   let lastError = "";
   for (const p of providers) {
-    for (let attempt = 1; attempt <= 2; ++attempt) {
+    // Conversation d'AUTO-REPARATION : l'erreur du validateur est renvoyee au modele pour correction
+    // (bien plus fiable qu'un retry aveugle, surtout pour le fallback gpt-4o-mini).
+    const convo: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
+      { role: "system", content: "Tu generes UNIQUEMENT du JSON strict conforme au schema demande. Aucun texte hors JSON." },
+      { role: "user", content: prompt },
+    ];
+    for (let attempt = 1; attempt <= 3; ++attempt) {
       try {
         const res = await p.client.chat.completions.create({
           model: p.model,
-          messages: [
-            { role: "system", content: "Tu generes UNIQUEMENT du JSON strict conforme au schema demande. Aucun texte hors JSON." },
-            { role: "user", content: prompt },
-          ],
+          messages: convo,
           response_format: { type: "json_object" },
           temperature: 0, // deterministe : meme etat -> meme extension (fiabilite demo)
+          seed: 7,
         });
         const text = res.choices[0]?.message?.content ?? "";
-        let parsed: AnyObj;
+        let parsed: AnyObj | null = null;
+        let err = "";
         try {
           parsed = canonicalizeKeys(JSON.parse(text)) as AnyObj; // le modele mime la casse du plan recu
         } catch {
-          lastError = `${p.label}: JSON illisible`;
-          continue;
+          err = "JSON illisible (syntaxe invalide)";
         }
-        sanitize(parsed);
-        const err = validateExtension(parsed, plan, items, anchors);
-        if (err) {
-          lastError = `${p.label}: ${err}`;
-          console.warn(`[dungeon-expand] tentative ${attempt} (${p.label}) invalide: ${err}`);
-          continue;
+        if (parsed) {
+          sanitize(parsed);
+          err = validateExtension(parsed, plan, items, anchors) ?? "";
+          if (!err) {
+            console.log(`[dungeon-expand] extension valide (${p.label}, vague ${wave}, essai ${attempt}) : ${asArray(parsed.nodes).length} salles`);
+            return { ok: true, extension: parsed };
+          }
         }
-        console.log(`[dungeon-expand] extension valide (${p.label}, vague ${wave}) : ${asArray(parsed.nodes).length} salles`);
-        return { ok: true, extension: parsed };
+        lastError = `${p.label}: ${err}`;
+        console.warn(`[dungeon-expand] tentative ${attempt} (${p.label}) invalide: ${err}`);
+        convo.push({ role: "assistant", content: text });
+        convo.push({ role: "user", content: `Ton JSON a ete REJETE par le validateur : ${err}. Corrige ce probleme et renvoie le JSON COMPLET corrige (meme schema, aucun texte hors JSON).` });
       } catch (err) {
-        lastError = `${p.label}: ${(err as Error)?.message ?? String(err)}`;
+        const msg = (err as Error)?.message ?? String(err);
+        lastError = `${p.label}: ${msg}`;
         console.error(`[dungeon-expand] appel LLM echoue (${p.label}):`, lastError);
+        if (/429|rate.?limit/i.test(msg) && attempt < 3) {
+          console.warn(`[dungeon-expand] rate limit ${p.label} -> attente 15 s avant nouvel essai`);
+          await sleep(15000);
+        }
       }
     }
   }
