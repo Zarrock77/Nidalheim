@@ -1,5 +1,6 @@
 import { Footer, Layout, Navbar } from "nextra-theme-docs";
 import { getPageMap } from "nextra/page-map";
+import { SessionProvider } from "next-auth/react";
 import { UserBadge } from "@/components/user-badge";
 import "nextra-theme-docs/style.css";
 
@@ -21,13 +22,15 @@ export default async function DocsLayout({
   children: React.ReactNode;
 }) {
   return (
-    <Layout
-      navbar={navbar}
-      pageMap={await getPageMap('/docs')}
-      docsRepositoryBase="https://github.com/EpitechPromo2027/G-EIP-600-PAR-6-1-eip-merwan.korkmaz"
-      footer={footer}
-    >
-      {children}
-    </Layout>
+    <SessionProvider>
+      <Layout
+        navbar={navbar}
+        pageMap={await getPageMap('/docs')}
+        docsRepositoryBase="https://github.com/EpitechPromo2027/G-EIP-600-PAR-6-1-eip-merwan.korkmaz"
+        footer={footer}
+      >
+        {children}
+      </Layout>
+    </SessionProvider>
   );
 }

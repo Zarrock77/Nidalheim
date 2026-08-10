@@ -1,9 +1,11 @@
-import { auth } from "@/lib/auth";
-import { logout } from "@/app/login/actions";
+"use client";
 
-export async function UserBadge() {
-  const session = await auth();
-  if (!session?.user) return null;
+import { signOut, useSession } from "next-auth/react";
+
+export function UserBadge() {
+  const { data: session, status } = useSession();
+
+  if (status !== "authenticated" || !session.user) return null;
 
   return (
     <div className="flex items-center gap-3 border border-[#d6af36]/30 bg-[#121218] px-3 py-1.5 text-[11px]">
@@ -15,14 +17,13 @@ export async function UserBadge() {
         <span className="uppercase tracking-[0.15em]">Connecté</span>
       </span>
       <span className="text-[#eaeaea]">{session.user.email}</span>
-      <form action={logout}>
-        <button
-          type="submit"
-          className="uppercase tracking-[0.15em] text-[#d6af36] transition-colors hover:text-[#eaeaea]"
-        >
-          Se déconnecter
-        </button>
-      </form>
+      <button
+        type="button"
+        onClick={() => signOut({ callbackUrl: "/login" })}
+        className="uppercase tracking-[0.15em] text-[#d6af36] transition-colors hover:text-[#eaeaea]"
+      >
+        Se déconnecter
+      </button>
     </div>
   );
 }
