@@ -32,6 +32,14 @@ export const Footer: React.FC = () => {
             >
               Community
             </a>
+            <a
+              href="https://docs.nidalheim.com"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-muted-foreground hover:text-primary transition-colors"
+            >
+              Docs
+            </a>
           </div>
 
           <div className="text-muted-foreground text-sm">

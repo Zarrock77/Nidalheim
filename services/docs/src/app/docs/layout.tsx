@@ -14,7 +14,17 @@ const navbar = (
     <UserBadge />
   </Navbar>
 );
-const footer = <Footer>MIT {new Date().getFullYear()} © Nidalheim.</Footer>;
+const footer = (
+  <Footer className="flex flex-wrap items-center justify-between gap-3">
+    <span>MIT {new Date().getFullYear()} © Nidalheim.</span>
+    <a
+      href="https://www.nidalheim.com"
+      className="text-[#d6af36] transition-colors hover:text-current"
+    >
+      Site vitrine ↗
+    </a>
+  </Footer>
+);
 
 export default async function DocsLayout({
   children,
