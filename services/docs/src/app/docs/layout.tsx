@@ -1,5 +1,6 @@
 import { Footer, Layout, Navbar } from "nextra-theme-docs";
 import { getPageMap } from "nextra/page-map";
+import { UserBadge } from "@/components/user-badge";
 import "nextra-theme-docs/style.css";
 
 export const metadata = {
@@ -7,7 +8,11 @@ export const metadata = {
   description: "Documentation for Nidalheim development",
 };
 
-const navbar = <Navbar logo={<b>Nidalheim</b>} />;
+const navbar = (
+  <Navbar logo={<b>Nidalheim</b>}>
+    <UserBadge />
+  </Navbar>
+);
 const footer = <Footer>MIT {new Date().getFullYear()} © Nidalheim.</Footer>;
 
 export default async function DocsLayout({
