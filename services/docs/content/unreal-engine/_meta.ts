@@ -13,6 +13,7 @@ export default {
   hud: "HUD & widgets",
   chat: "Chat & UI",
   persistence: "Persistance & systèmes de jeu",
+  "rpg-guide": "Guide RPG (level design)",
   commandlets: "Commandlets éditeur",
   conventions: "Conventions",
 };

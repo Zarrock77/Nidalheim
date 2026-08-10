@@ -1,0 +1,125 @@
+---
+title: Guide RPG (level design)
+---
+
+# Guide des nouvelles fonctionnalités RPG
+
+Documentation des systèmes ajoutés le 31/07/2026, avec le mode d'emploi pour les configurer dans l'éditeur Unreal. Toutes ces fonctionnalités sont **rétrocompatibles** : par défaut (rien de configuré), le comportement reste celui d'avant — aucun risque de casser un niveau existant en synchronisant ce changelist.
+
+Ce guide est centré sur « comment je m'en sers en tant que level designer ». Pour le détail technique (classes, flux, architecture), voir les pages dédiées : [Personnages](/docs/unreal-engine/characters), [IA ennemie & Behavior Tree](/docs/unreal-engine/ai-enemy), [Système de survie](/docs/unreal-engine/survival), [Arbre de talents](/docs/unreal-engine/talents), [Inventaire & hotbar](/docs/unreal-engine/inventory), [Persistance & systèmes de jeu](/docs/unreal-engine/persistence).
+
+---
+
+## 1. PNJ vivants — routine et points d'intérêt
+
+**Avant** : les PNJ posés en niveau (`ANidalheimInGameNPC`) restaient figés en idle.
+**Maintenant** : ils peuvent se déplacer entre des points d'intérêt (banc, forge, puits...), avec une vraie activité.
+
+### Étapes
+
+1. Poser des acteurs `ANidalheimNPCPointOfInterest` dans le niveau (un par lieu où un PNJ peut « faire quelque chose » : banc, établi, puits, poste de garde...).
+2. Sur chaque point d'intérêt, régler dans les Détails :
+   - `Activity Id` — nom informatif (ex. "Forge"), sans effet gameplay, juste pour s'y retrouver.
+   - `Activity Montage` — optionnel. Si renseigné, le PNJ joue ce montage en boucle tant qu'il est sur place. Si vide, il reste juste immobile, orienté comme l'acteur, avec de petits regards naturels toutes les 2,5–5 s.
+   - `Min Dwell Time` / `Max Dwell Time` — durée (secondes) que le PNJ passe sur ce point avant de repartir.
+3. Sélectionner le PNJ (`ANidalheimInGameNPC` ou son Blueprint), et dans **NPC|Routine**, remplir `Routine POIs` avec les points d'intérêt qu'il doit visiter. Il choisira au hasard parmi eux (jamais le même deux fois de suite, jamais un point déjà pris par un autre PNJ).
+4. **Optionnel — horaires jour/nuit** : remplir aussi `Night Routine POIs` (ex. juste le lit du PNJ) pour qu'il change de comportement la nuit. Si cette liste est vide, `Routine POIs` sert jour et nuit sans distinction.
+
+### Notes
+
+- Le joueur qui entre en conversation avec un PNJ (sphère d'interaction) l'interrompt automatiquement, quel que soit son état — il reprend sa routine à la fin de la conversation.
+- Un PNJ avec `Routine POIs` vide reste figé comme avant (aucun changement de comportement).
+- Si le PNJ ne bouge pas correctement (glisse au lieu de marcher), vérifier `Locomotion Anim Class` dans **NPC|Routine** — doit pointer vers une AnimBP à locomotion pilotée par la vélocité (le défaut `ABP_Unarmed` convient au squelette joueur/ennemi standard).
+
+---
+
+## 2. Cycle jour/nuit
+
+**Rien à poser** : le système trouve automatiquement le premier `DirectionalLight` et `SkyLight` du niveau au démarrage.
+
+### Réglages (sur l'instance de `UNidalheimDayNightSubsystem`, accessible via les settings du monde ou en debug)
+
+- `Day Length Minutes` (défaut 20) — durée réelle d'un cycle complet de 24h in-game.
+- `Start Hour` (défaut 8) — heure de départ au lancement du niveau.
+- `Dawn Hour` / `Dusk Hour` (défaut 6 / 20) — bornes jour/nuit, utilisées par `IsNight()`/`IsDay()` (donc aussi par les horaires PNJ).
+- `Sky Light Recapture Interval Seconds` (défaut 10) — fréquence de rafraîchissement de la lumière indirecte. Ne pas descendre trop bas (coûteux).
+- `Max Sun Elevation Degrees` (défaut 85) — élévation max du soleil. Ne pas monter à 90 : le rendu du disque solaire devient instable pile à la verticale (bug corrigé le 31/07, cf. historique Perforce des changelists 278/280).
+
+Une horloge (`HH:MM`) s'affiche automatiquement en haut du HUD, aucune configuration nécessaire.
+
+---
+
+## 3. XP & niveaux
+
+**Rien à poser**, le composant est déjà sur le joueur.
+
+### Étapes
+
+1. Sur chaque `ANidalheimEnemyCharacter` (ou son Blueprint), régler `XP Reward` (**Enemy|Rewards**) — XP donnée au joueur à sa mort. Déjà présent avant ce changelist, juste jamais utilisé jusqu'ici.
+2. Le joueur monte de niveau automatiquement (courbe croissante configurable sur `UNidalheimExperienceComponent` : `Base XP To Level 2`, `XP Curve Growth`, `Max Level`, `Talent Points Per Level`).
+
+Chaque niveau accorde des points de talent, utilisables normalement dans l'arbre de talents (touche T).
+
+---
+
+## 4. Butin aléatoire
+
+### Étapes
+
+1. Sur un `ANidalheimEnemyCharacter`, dans **Enemy|Rewards**, remplir `Loot Table`.
+2. Chaque entrée :
+   - `Item Id` — doit exister dans le catalogue (`UNidalheimItemDatabase::RegisterDefaults()`, en C++) ou être ajouté au catalogue si besoin.
+   - `Drop Chance` — probabilité (0–1), tirée indépendamment par entrée (donc 0, 1 ou plusieurs items peuvent tomber du même ennemi).
+   - `Min Quantity` / `Max Quantity`.
+
+Vide par défaut = aucun butin, comme avant.
+
+---
+
+## 5. Sommeil
+
+### Étapes
+
+1. Poser un acteur `ANidalheimSleepPoint` (lit, campement...) dans le niveau.
+2. Régler :
+   - `Wake Up Hour` (défaut 8) — heure à laquelle le joueur se réveille.
+   - `Auto Save Slot Name` (défaut "Slot1") — sauvegarde automatiquement au réveil. Laisser vide pour désactiver.
+   - `Well Rested Duration Seconds` (défaut 300) — durée du bonus « bien reposé » (ralentit le drain faim/soif de moitié). Mettre à 0 pour désactiver le bonus.
+   - `Sleep Radius` (défaut 120) — rayon de la sphère qui déclenche le sommeil.
+
+Le joueur qui marche dans la sphère déclenche l'effet automatiquement (même logique que ramasser un item — pas de touche dédiée).
+
+---
+
+## 6. Équipement d'armure
+
+### Étapes
+
+1. Créer un item de type `Armor` (catalogue C++ `UNidalheimItemDatabase`, ou pickup direct avec `Item.Type = Armor`).
+2. Régler `Armor Value` sur cet item — bonus appliqué à l'attribut `Armor` du joueur tant qu'il est équipé.
+3. En jeu, activer l'item depuis la hotbar l'équipe. Réactiver le même item le déséquipe (toggle).
+
+---
+
+## 7. Riposte des PNJ
+
+**Activé par défaut sur tous les PNJ** — aucune configuration nécessaire pour que ça fonctionne.
+
+### Pour désactiver sur un PNJ précis (ex. un PNJ scripté pacifiste)
+
+- Sur son `ANidalheimInGameNPC`, dans **NPC|Combat**, décocher `Can Fight Back`.
+
+### Réglages avancés (optionnels, valeurs par défaut déjà équilibrées)
+
+- `Defend Attack Range` (défaut 150) — portée de riposte.
+- `Defend Attack Cooldown` (défaut 1.5s) — délai entre deux coups.
+- `Defend Disengage Time` (défaut 8s) — temps sans nouveau coup reçu avant que le PNJ abandonne et reprenne sa routine.
+- `Defend Ability` — ability utilisée pour riposter (défaut : la même mêlée que les ennemis, aucune arme requise).
+
+**Portée volontairement limitée** : la riposte est individuelle. Attaquer un PNJ ne rend pas les autres PNJ hostiles (pas de système de réputation/alarme de faction pour l'instant).
+
+---
+
+## Pour aller plus loin
+
+Tout ce qui précède est fonctionnel côté code mais **n'a pas encore été testé visuellement en jeu** — premier passage recommandé : ouvrir l'éditeur, poser 2-3 points d'intérêt sur un PNJ, tester le sommeil et une riposte en PIE, ajuster les valeurs par défaut selon le ressenti.
