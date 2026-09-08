@@ -1,6 +1,7 @@
 import WebSocket from "ws";
 import fs from "fs";
 import path from "path";
+import { SpeechTurn } from "./speechTurn.js";
 import { DeepgramStreamingSTT } from "./providers/deepgram.js";
 import { ElevenLabsStreamingTTS } from "./providers/elevenlabs.js";
 import { CartesiaStreamingTTS } from "./providers/cartesia.js";
@@ -30,16 +31,6 @@ export interface AudioPipelineConfig {
   llmApiKey?: string;
   llmModel?: string;
   llmBaseUrl?: string;
-}
-
-interface TTSLike {
-  onAudio: (base64Pcm: string) => void;
-  onError: (err: Error) => void;
-  beginUtterance?: () => void;
-  sendText: (text: string) => void;
-  flush: () => void | string | null | undefined;
-  close: () => void;
-  start?: () => Promise<void>;
 }
 
 type TTSRoute =
@@ -87,6 +78,8 @@ export class AudioPipeline {
   private readonly missionState: MissionState;
 
   private utteranceInFlight = false;
+  private pendingUtterances: string[] = [];
+  private activeSpeech: SpeechTurn | null = null;
   private pendingTranscript = "";
   private commitRequested = false;
   private disposed = false;
@@ -235,83 +228,43 @@ export class AudioPipeline {
   }
 
   private async _handleUtterance(userText: string): Promise<void> {
+    if (this.disposed) return;
     if (this.utteranceInFlight) {
-      console.log(`[pipeline ${this.user.username}] LLM already in flight, dropping "${userText}"`);
+      if (this.pendingUtterances.length < 4) this.pendingUtterances.push(userText);
+      else this._send({ type: "error", message: "Trop de demandes vocales en attente. Attendez la reponse du PNJ." });
       return;
     }
     this.utteranceInFlight = true;
     const t0 = Date.now();
     const mark = (label: string): void => console.log(`[pipeline ${this.user.username}] +${Date.now() - t0}ms ${label}`);
+    let speech: SpeechTurn | null = null;
+    try {
+      const tts = this.ttsRoute.persistent ? this.ttsRoute.instance : this.ttsRoute.make();
+      const turn = new SpeechTurn(tts, (event) => this._send(event), !this.ttsRoute.persistent,
+        () => mark("first audio chunk"));
+      speech = this.activeSpeech = turn;
+      mark("llm call");
+      let firstTokenAt: number | null = null;
 
-    let tts: TTSLike;
-    let needCloseOnDone = false;
-    if (this.ttsRoute.persistent) {
-      tts = this.ttsRoute.instance;
-      this.ttsRoute.instance.beginUtterance();
-    } else {
-      tts = this.ttsRoute.make();
-      needCloseOnDone = true;
-    }
-
-    let firstAudioAt: number | null = null;
-    const onAudio = (base64Pcm: string): void => {
-      if (!firstAudioAt) {
-        firstAudioAt = Date.now();
-        mark("first audio chunk");
+      // Reload shared text/voice history before each serialized turn.
+      let history: ChatMessage[] = [];
+      try {
+        history = await this.conversationStore.loadRecent(this.user.id, this.npc.id);
+      } catch (err) {
+        console.error(`[pipeline ${this.user.username}/${this.npc.id}] history load failed:`, (err as Error)?.message ?? err);
       }
-      this._send({ type: "audio", data: base64Pcm });
-    };
-    const onErr = (err: unknown): void => {
-      console.error(`[pipeline ${this.user.username}] tts error`, err);
-      this._send({ type: "error", message: `text-to-speech: ${(err as Error)?.message ?? err}` });
-    };
-    tts.onAudio = onAudio;
-    tts.onError = onErr;
-
-    const ttsReadyPromise: Promise<boolean> = this.ttsRoute.persistent
-      ? Promise.resolve(true)
-      : (tts.start?.() ?? Promise.resolve()).then(
-          () => { mark("tts ready"); return true; },
-          (err: unknown) => { mark(`tts start FAILED ${(err as Error)?.message ?? err}`); onErr(err); return false; },
-        );
-
-    const pendingDeltas: string[] = [];
-    let ttsReady = this.ttsRoute.persistent;
-    let ttsFailed = false;
-    if (!ttsReady) {
-      ttsReadyPromise.then((ok) => {
-        ttsReady = ok;
-        if (!ok) { ttsFailed = true; return; }
-        for (const d of pendingDeltas) tts.sendText(d);
-        pendingDeltas.length = 0;
-      });
-    }
-
-    mark("llm call");
-    let firstTokenAt: number | null = null;
-
-    // Recharge l'historique partage a chaque tour -> sync live vocal<->texte.
-    let history: ChatMessage[] = [];
-    try {
-      history = await this.conversationStore.loadRecent(this.user.id, this.npc.id);
-    } catch (err) {
-      console.error(`[pipeline ${this.user.username}/${this.npc.id}] history load failed:`, (err as Error)?.message ?? err);
-    }
-    // Regles DETERMINISTES : le CODE confie/valide les epreuves (garanties demo), le LLM annonce.
-    const actions = applyDeterministicMissionActions(this.missionState);
-    for (const ev of actions.events) {
-      this._send({ ...ev });
-      console.log(`[pipeline ${this.user.username}/${this.npc.id}] ${ev.type} ${ev.missionId ?? "-"} (auto)`);
-    }
-
-    const messages = [
-      { role: "system" as const, content: buildSystemPrompt(this.npc, this.missionState.all(), this.missionState.getInventory()) },
-      ...history,
-      { role: "user" as const, content: userText },
-      ...actions.notes.map((n) => ({ role: "system" as const, content: n })),
-    ];
-
-    try {
+      if (this.disposed) return;
+      const actions = applyDeterministicMissionActions(this.missionState);
+      for (const ev of actions.events) {
+        this._send({ ...ev });
+        console.log(`[pipeline ${this.user.username}/${this.npc.id}] ${ev.type} ${ev.missionId ?? "-"} (auto)`);
+      }
+      const messages = [
+        { role: "system" as const, content: buildSystemPrompt(this.npc, this.missionState.all(), this.missionState.getInventory()) },
+        ...history,
+        { role: "user" as const, content: userText },
+        ...actions.notes.map((n) => ({ role: "system" as const, content: n })),
+      ];
       const full = await this.engine.respond(messages, {
         stream: true,
         onDelta: (delta) => {
@@ -319,41 +272,44 @@ export class AudioPipeline {
             firstTokenAt = Date.now();
             mark("first LLM token");
           }
-          if (ttsFailed) return;
-          if (ttsReady) {
-            tts.sendText(delta);
-          } else {
-            pendingDeltas.push(delta);
-          }
+          turn.write(delta);
         },
       });
-
+      if (this.disposed) return;
       mark("llm complete");
       console.log(`[pipeline ${this.user.username}/${this.npc.id}] NPC reply: "${full}"`);
       this._send({ type: "text", data: full });
-      ttsReadyPromise.then((ok) => {
-        if (!ok) return;
-        tts.flush();
-      });
-      this.conversationStore
-        .appendTurn(this.user.id, this.npc.id, userText, full, "audio")
-        .catch((err) => console.error(`[pipeline ${this.user.username}/${this.npc.id}] history save failed:`, (err as Error)?.message ?? err));
+      // Finish TTS immediately; database latency must not delay the last audio.
+      await Promise.all([
+        turn.finishText(),
+        this.conversationStore.appendTurn(this.user.id, this.npc.id, userText, full, "audio")
+          .catch((err) => console.error(`[pipeline ${this.user.username}/${this.npc.id}] history save failed:`, (err as Error)?.message ?? err)),
+      ]);
     } catch (err) {
-      this._send({ type: "error", message: `llm: ${(err as Error)?.message ?? err}` });
-      if (needCloseOnDone) tts.close();
+      speech?.cancel();
+      this._send({ type: "error", message: "Le dialogue vocal a ete interrompu." });
+      console.error("[pipeline] voice turn failed", (err as Error)?.message);
+    } finally {
+      // Also wait for connection cleanup on failure before reusing a persistent provider.
+      await speech?.finishText();
+      if (this.activeSpeech === speech) this.activeSpeech = null;
+      this.utteranceInFlight = false;
+      const next = this.pendingUtterances.shift();
+      if (next && !this.disposed) void this._handleUtterance(next);
     }
-
-    this.utteranceInFlight = false;
   }
 
   private _send(obj: Record<string, unknown>): void {
-    if (this.clientWs.readyState !== WebSocket.OPEN) return;
+    if (this.disposed || this.clientWs.readyState !== WebSocket.OPEN) return;
     this.clientWs.send(JSON.stringify(obj));
   }
 
   shutdown(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.pendingUtterances = [];
+    this.activeSpeech?.cancel();
+    this.activeSpeech = null;
     releaseMissionState(this.user.id, this.npc.id);
     if (this.keepAliveTimer) {
       clearInterval(this.keepAliveTimer);

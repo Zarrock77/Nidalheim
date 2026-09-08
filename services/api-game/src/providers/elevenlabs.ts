@@ -36,6 +36,7 @@ export class ElevenLabsStreamingTTS {
   private readonly autoMode: boolean;
   private readonly voiceSettings: ElevenLabsVoiceSettings;
   private ws: WebSocket | null = null;
+  private finished = false;
 
   onAudio: (base64Pcm: string) => void = () => {};
   onFinal: () => void = () => {};
@@ -74,6 +75,7 @@ export class ElevenLabsStreamingTTS {
   }
 
   async start(): Promise<void> {
+    this.finished = false;
     const qs = new URLSearchParams({
       model_id: this.modelId,
       output_format: this.outputFormat,
@@ -86,7 +88,10 @@ export class ElevenLabsStreamingTTS {
     const ws = this.ws;
 
     await new Promise<void>((resolve, reject) => {
-      const to = setTimeout(() => reject(new Error("elevenlabs open timeout")), 8000);
+      const to = setTimeout(() => {
+        reject(new Error("elevenlabs open timeout"));
+        ws.terminate();
+      }, 8000);
       ws.once("open", () => {
         clearTimeout(to);
         ws.send(JSON.stringify({
@@ -108,11 +113,13 @@ export class ElevenLabsStreamingTTS {
     });
 
     ws.on("error", (err) => {
+      if (this.ws !== ws) return;
       console.error("[elevenlabs error]", err);
       this.onError(err);
     });
 
     ws.on("message", (data: WebSocket.RawData) => {
+      if (this.ws !== ws) return;
       let msg: ElevenLabsMessage;
       try {
         msg = JSON.parse(data.toString()) as ElevenLabsMessage;
@@ -121,6 +128,7 @@ export class ElevenLabsStreamingTTS {
       }
       if (msg.audio) this.onAudio(msg.audio);
       if (msg.isFinal) {
+        this.finished = true;
         this.onFinal();
         try { this.ws?.close(); } catch { /* ignore */ }
       }
@@ -129,23 +137,29 @@ export class ElevenLabsStreamingTTS {
         this.onError(new Error(msg.error));
       }
     });
+    ws.on("close", () => {
+      if (this.ws !== ws) return;
+      this.ws = null;
+      if (!this.finished) this.onError(new Error("ElevenLabs closed before final audio"));
+    });
   }
 
   sendText(text: string): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) throw new Error("ElevenLabs is not connected");
     if (!text) return;
     const framed = text.endsWith(" ") ? text : text + " ";
     this.ws.send(JSON.stringify({ text: framed }));
   }
 
   flush(): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) throw new Error("ElevenLabs is not connected");
     this.ws.send(JSON.stringify({ text: "" }));
   }
 
   close(): void {
     if (!this.ws) return;
-    try { this.ws.close(); } catch { /* ignore */ }
+    const ws = this.ws;
     this.ws = null;
+    try { ws.close(); } catch { /* ignore */ }
   }
 }

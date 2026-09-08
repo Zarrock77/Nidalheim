@@ -40,6 +40,7 @@ export class CartesiaStreamingTTS {
   private readonly apiVersion: string;
   private ws: WebSocket | null = null;
   private contextId: string | null = null;
+  private opening: Promise<void> | null = null;
 
   onAudio: (base64Pcm: string) => void = () => {};
   onFinal: () => void = () => {};
@@ -66,6 +67,13 @@ export class CartesiaStreamingTTS {
   }
 
   async start(): Promise<void> {
+    if (this.ws?.readyState === WebSocket.OPEN) return;
+    if (this.opening) return this.opening;
+    this.opening = this.openConnection();
+    try { await this.opening; } finally { this.opening = null; }
+  }
+
+  private async openConnection(): Promise<void> {
     const qs = new URLSearchParams({
       api_key: this.apiKey,
       cartesia_version: this.apiVersion,
@@ -75,7 +83,10 @@ export class CartesiaStreamingTTS {
     const ws = this.ws;
 
     await new Promise<void>((resolve, reject) => {
-      const to = setTimeout(() => reject(new Error("cartesia open timeout")), 8000);
+      const to = setTimeout(() => {
+        reject(new Error("cartesia open timeout"));
+        ws.terminate();
+      }, 8000);
       ws.once("open", () => { clearTimeout(to); resolve(); });
       ws.once("error", (err) => { clearTimeout(to); reject(err); });
       ws.once("unexpected-response", (_req, res) => {
@@ -89,15 +100,21 @@ export class CartesiaStreamingTTS {
     });
 
     ws.on("error", (err) => {
+      if (this.ws !== ws) return;
       console.error("[cartesia error]", err);
       this.onError(err);
     });
 
     ws.on("close", () => {
+      if (this.ws !== ws) return;
+      const hadActiveContext = this.contextId !== null;
       this.ws = null;
+      this.contextId = null;
+      if (hadActiveContext) this.onError(new Error("Cartesia closed before final audio"));
     });
 
     ws.on("message", (raw: WebSocket.RawData) => {
+      if (this.ws !== ws) return;
       let msg: CartesiaMessage;
       try {
         msg = JSON.parse(raw.toString()) as CartesiaMessage;
@@ -111,7 +128,9 @@ export class CartesiaStreamingTTS {
       }
       if (msg.type === "error") {
         console.error("[cartesia reply error]", msg);
+        this.contextId = null;
         this.onError(new Error(msg.error ?? "cartesia error"));
+        return;
       }
       if (msg.done === true || msg.type === "done") {
         if (msg.context_id && msg.context_id === this.contextId) {
@@ -123,18 +142,19 @@ export class CartesiaStreamingTTS {
   }
 
   beginUtterance(): void {
+    if (this.contextId) throw new Error("Previous Cartesia utterance has not finished");
     this.contextId = randomUUID();
   }
 
   sendText(text: string): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) throw new Error("Cartesia is not connected");
     if (!text) return;
     if (!this.contextId) this.beginUtterance();
     this.ws.send(JSON.stringify(this._frame(text, true)));
   }
 
   flush(): string | null | undefined {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) throw new Error("Cartesia is not connected");
     if (!this.contextId) return;
     this.ws.send(JSON.stringify(this._frame("", false)));
     return this.contextId;
@@ -142,9 +162,10 @@ export class CartesiaStreamingTTS {
 
   close(): void {
     if (!this.ws) return;
-    try { this.ws.close(); } catch { /* ignore */ }
+    const ws = this.ws;
     this.ws = null;
     this.contextId = null;
+    try { ws.close(); } catch { /* ignore */ }
   }
 
   private _frame(transcript: string, cont: boolean): CartesiaFrame {
