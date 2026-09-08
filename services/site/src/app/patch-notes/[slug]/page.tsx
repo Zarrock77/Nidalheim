@@ -158,12 +158,12 @@ export async function generateMetadata({
   const { frontmatter } = patch;
 
   return {
-    title: `${frontmatter.title} — Nidalheim Patch Notes`,
+    title: `${frontmatter.title}: Nidalheim Patch Notes`,
     description:
       frontmatter.summary ||
       `Discover what's new in version ${frontmatter.version} of Nidalheim.`,
     openGraph: {
-      title: `${frontmatter.title} — Nidalheim Patch Notes`,
+      title: `${frontmatter.title}: Nidalheim Patch Notes`,
       description:
         frontmatter.summary ||
         `Learn about the latest changes, improvements, and new content in Nidalheim.`,
@@ -197,7 +197,7 @@ export default async function PatchPage({
           Patch Note Not Found
         </h1>
         <Link href="/patch-notes">
-          <button className="text-primary hover:text-secondary underline decoration-primary/50 hover:decoration-secondary transition-colors duration-300">
+          <button className="text-white hover:text-secondary underline decoration-white/50 hover:decoration-secondary transition-colors duration-300">
             Back to Patch Notes
           </button>
         </Link>
@@ -212,7 +212,7 @@ export default async function PatchPage({
       {/* Back Button */}
       <div className="mb-8">
         <Link href="/patch-notes">
-          <button className="text-primary hover:text-secondary underline decoration-primary/50 hover:decoration-secondary transition-colors duration-300 text-sm">
+          <button className="text-white hover:text-secondary underline decoration-white/50 hover:decoration-secondary transition-colors duration-300 text-sm">
             ← Back to Patch Notes
           </button>
         </Link>

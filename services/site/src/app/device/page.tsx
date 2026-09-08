@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { DeviceApproval } from "@/components/device/DeviceApproval";
 
 export const metadata: Metadata = {
-  title: "Authorize Device — Nidalheim",
+  title: "Authorize Device: Nidalheim",
   description: "Approve a Nidalheim game session sign-in.",
 };
 

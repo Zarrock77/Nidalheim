@@ -36,7 +36,7 @@ export const GameButton: React.FC<GameButtonProps> = ({
   const fillStyles =
     variant === "primary"
       ? "bg-[#d6af36] text-[#0a0a0f] hover:bg-[#b89520]"
-      : "bg-[#1f8ac0] text-white hover:bg-[#1570a0]";
+      : "bg-white text-[#0a0a0f] hover:bg-[#eaeaea]";
 
   return (
     <button

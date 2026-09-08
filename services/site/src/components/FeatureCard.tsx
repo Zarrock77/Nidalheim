@@ -23,7 +23,7 @@ export const FeatureCard: React.FC<FeatureCardProps> = ({
       className="reverse-radius group bg-foreground/10 p-px transition-colors duration-300 hover:bg-[#1f8ac0]/60"
     >
       <div className="reverse-radius-inner bg-card p-8 transition-colors duration-300 group-hover:shadow-[0_0_30px_rgba(31,138,192,0.2)]">
-        <div className="text-primary mb-4">{icon}</div>
+        <div className="text-white mb-4">{icon}</div>
         <h3 className="mb-3 text-secondary">{title}</h3>
         <p className="text-muted-foreground leading-relaxed">{description}</p>
       </div>

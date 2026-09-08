@@ -5,7 +5,7 @@ import { PatchSection } from "@/features/home/PatchSection";
 import { CommunitySection } from "@/features/home/CommunitySection";
 
 export const metadata: Metadata = {
-  title: "Nidalheim — Dark Fantasy RPG with AI-Powered NPCs",
+  title: "Nidalheim: Dark Fantasy RPG with AI-Powered NPCs",
   description:
     "Enter the mythic world of Nidalheim, a dark fantasy RPG where your choices shape intelligent AI NPCs and the fate of gods and mortals.",
   keywords: [
@@ -19,7 +19,7 @@ export const metadata: Metadata = {
     "Interactive Storytelling",
   ],
   openGraph: {
-    title: "Nidalheim — AI-Driven Dark Fantasy RPG",
+    title: "Nidalheim: AI-Driven Dark Fantasy RPG",
     description:
       "Discover Nidalheim, an immersive RPG with advanced AI NPCs that remember your choices and evolve with you.",
     url: "https://www.nidalheim.com",

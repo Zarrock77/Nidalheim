@@ -3,7 +3,7 @@ import { getPatchNotes } from "@/features/patch-notes/lib/getPatchNotes";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Nidalheim — Patch Notes & Updates",
+  title: "Nidalheim: Patch Notes & Updates",
   description:
     "Stay up to date with Nidalheim’s latest updates and gameplay improvements. Explore all patch notes and new content versions.",
   keywords: [
@@ -16,7 +16,7 @@ export const metadata: Metadata = {
     "AI NPC Updates",
   ],
   openGraph: {
-    title: "Nidalheim — Patch Notes & Updates",
+    title: "Nidalheim: Patch Notes & Updates",
     description:
       "Browse all updates and version releases of Nidalheim, including AI behavior improvements, new areas, and gameplay polish.",
     url: "https://www.nidalheim.com/patch-notes",

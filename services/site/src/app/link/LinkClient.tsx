@@ -130,7 +130,7 @@ export const LinkClient: React.FC<LinkClientProps> = ({ initialCode }) => {
       <Shell>
         <StatusMessage label="Device connected." tone="success" />
         <p className="mt-6 text-center text-sm text-muted-foreground">
-          Return to the game — this window can be closed.
+          Return to the game. This window can be closed.
         </p>
       </Shell>
     );

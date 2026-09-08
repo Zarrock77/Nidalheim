@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { LinkClient } from "./LinkClient";
 
 export const metadata: Metadata = {
-  title: "Connect Device — Nidalheim",
+  title: "Connect Device: Nidalheim",
   description: "Authorize Nidalheim Game to access your account.",
 };
 

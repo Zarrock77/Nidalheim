@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { AuthForm } from "@/components/auth/AuthForm";
 
 export const metadata: Metadata = {
-  title: "Sign In — Nidalheim",
+  title: "Sign In: Nidalheim",
   description: "Enter the realm of Nidalheim.",
 };
 

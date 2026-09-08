@@ -28,10 +28,10 @@ export const CommunitySection = () => {
             <motion.a
               href="https://discord.gg/yKyHQyANvm"
               whileHover={{ scale: 1.05 }}
-              className="reverse-radius-sm group inline-block bg-[#1f8ac0] p-px transition-colors duration-300"
+              className="reverse-radius-sm group inline-block bg-white p-px transition-colors duration-300"
             >
               <span className="reverse-radius-sm-inner flex items-center gap-3 bg-card px-8 py-4 transition-colors duration-300 group-hover:bg-black/50">
-                <MessageCircle size={28} className="text-primary" />
+                <MessageCircle size={28} className="text-white" />
                 <span>Discord</span>
               </span>
             </motion.a>
