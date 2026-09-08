@@ -10,8 +10,7 @@ import { HttpRouter, sendJson } from "./httpRouter.js";
 import { getNpc } from "./npcStore.js";
 import { ChatEngine } from "./providers/chatEngine.js";
 import { buildSystemPrompt } from "./systemPrompt.js";
-import { MISSION_VALIDATE_TOOL, MISSION_START_TOOL } from "./missionCatalog.js";
-import { handleValidateMission, handleStartMission } from "./missionTool.js";
+import { applyDeterministicMissionActions } from "./missionTool.js";
 import { acquireMissionState, releaseMissionState, parseMissionSync, parseInventorySync, type MissionState } from "./missionState.js";
 import { generateDungeonExtension, type CatalogItem } from "./dungeonExpansion.js";
 import { QuestGenerator } from "./questGenerator.js";
@@ -81,42 +80,23 @@ async function handleTextConnection(
       console.error(`[text ${user.username}/${npc.id}] history load failed:`, (err as Error)?.message ?? err);
     }
 
-    const missions = missionState.all();
+    // Regles DETERMINISTES : le CODE confie/valide les epreuves (garanties demo), le LLM annonce.
+    const actions = applyDeterministicMissionActions(missionState);
+    for (const ev of actions.events) {
+      if (websocket.readyState === WebSocket.OPEN) { websocket.send(JSON.stringify(ev)); }
+      console.log(`[text ${user.username}/${npc.id}] ${ev.type} ${ev.missionId ?? "-"} (auto)`);
+    }
+
     const messages = [
-      { role: "system" as const, content: buildSystemPrompt(npc, missions, missionState.getInventory()) },
+      { role: "system" as const, content: buildSystemPrompt(npc, missionState.all(), missionState.getInventory()) },
       ...history,
       { role: "user" as const, content: userText },
+      ...actions.notes.map((n) => ({ role: "system" as const, content: n })),
     ];
 
     let reply: string;
     try {
-      reply = await chatEngine.respond(messages, {
-        // Tool expose UNIQUEMENT quand il peut servir : mission active + objet en main (cas ou la
-        // validation peut reussir). Sinon aucun tool -> le prompt gere le dialogue (et zero fuite).
-        tools: [
-          ...(missions.some((m) => !m.completed && !m.started) ? [MISSION_START_TOOL] : []),
-          ...(missions.some((m) => !m.completed && (m.hasObjectiveItem || missionState.hasItem(m.objectiveItemId))) ? [MISSION_VALIDATE_TOOL] : []),
-        ],
-        onToolCall: async (name, argumentsJson) => {
-          if (name === "start_mission") {
-            const outcome = handleStartMission(missionState, argumentsJson);
-            if (outcome.started && websocket.readyState === WebSocket.OPEN) {
-              websocket.send(JSON.stringify({ type: "mission_started", missionId: outcome.missionId }));
-            }
-            console.log(`[text /] start_mission  -> started=`);
-            return outcome.toolResult;
-          }
-          if (name === "validate_mission") {
-            const outcome = handleValidateMission(missionState, argumentsJson);
-            if (websocket.readyState === WebSocket.OPEN) {
-              websocket.send(JSON.stringify({ type: "mission_validation_result", missionId: outcome.missionId, ok: outcome.ok }));
-            }
-            console.log(`[text ${user.username}/${npc.id}] validate_mission ${outcome.missionId ?? "-"} -> ok=${outcome.ok}`);
-            return outcome.toolResult;
-          }
-          return `tool inconnu: ${name}`;
-        },
-      });
+      reply = await chatEngine.respond(messages, {});
     } catch (err) {
       console.error(`[text ${user.username}/${npc.id}] LLM error:`, (err as Error)?.message ?? err);
       websocket.send("Error generating response.");

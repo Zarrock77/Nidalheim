@@ -31,6 +31,17 @@ export interface ChatRespondOptions {
  * ("<function=name>{args}</function>") au lieu d'un tool_call structure. On l'extrait pour en
  * faire un VRAI tool_call (l'outil s'execute), et on renvoie le texte debarrasse du fragment.
  */
+// Echappatoire de la decision forcee (tool_choice required) : le modele DOIT choisir un outil,
+// no_action = "rien a faire ce tour". Jamais transmis au onToolCall.
+const NO_ACTION_TOOL: SdkTool = {
+  type: "function",
+  function: {
+    name: "no_action",
+    description: "A appeler quand aucun autre outil n'est pertinent pour ce tour.",
+    parameters: { type: "object", properties: {}, required: [] },
+  },
+};
+
 function extractTextToolCalls(content: string): { calls: SdkToolCall[]; cleaned: string } {
   const re = /<function\s*=\s*"?([a-zA-Z0-9_.-]+)"?\s*>([\s\S]*?)<\/function\s*>/gi;
   const calls: SdkToolCall[] = [];
@@ -86,16 +97,18 @@ export class ChatEngine {
       : null;
     this.openai = cfg.openaiApiKey ? new OpenAI({ apiKey: cfg.openaiApiKey }) : null;
     this.groqModel = cfg.groqModel || "llama-3.1-8b-instant";
-    this.openaiModel = cfg.openaiModel || process.env.OPENAI_FALLBACK_MODEL || "gpt-4o-mini";
+    this.openaiModel = cfg.openaiModel || process.env.OPENAI_FALLBACK_MODEL || "gpt-5.4-mini";
     if (!this.groq && !this.openai) {
       throw new Error("ChatEngine: aucun provider LLM configure (ni Groq ni OpenAI)");
     }
   }
 
   async respond(messages: ChatPromptMessage[], opts: ChatRespondOptions = {}): Promise<string> {
+    // OpenAI en PRIMAIRE (tool-calling fiable, pas de rate-limit agressif, temperature 0 + seed
+    // supportes) ; Groq en secours (rapide mais Llama flanche sur les outils et le tier rate-limite).
     const providers: Array<{ label: string; client: OpenAI; model: string }> = [];
-    if (this.groq) providers.push({ label: "groq", client: this.groq, model: opts.model || this.groqModel });
     if (this.openai) providers.push({ label: "openai", client: this.openai, model: this.openaiModel });
+    if (this.groq) providers.push({ label: "groq", client: this.groq, model: opts.model || this.groqModel });
 
     let lastErr: unknown;
     for (const p of providers) {
@@ -138,7 +151,14 @@ export class ChatEngine {
 
     // Phase 1 — DECISION (texte ignore). Le modele appelle 0..n tools ; on les execute.
     if (useTools) {
-      const { toolCalls } = await this._callOnce(client, model, msgs, opts.tools, false, undefined);
+      // Decision FORCEE : tool_choice required + no_action -> le modele choisit toujours
+      // explicitement (Llama partait parfois en prose sans rien appeler).
+      const decisionMsgs: SdkMessage[] = [
+        ...msgs,
+        { role: "system", content: "PHASE DE DECISION (interne, le joueur ne voit rien) : appelle le ou les outils pertinents pour le dernier message du joueur, en suivant les regles du prompt. Si aucun outil n'est utile ce tour, appelle no_action." },
+      ];
+      const { toolCalls: rawCalls } = await this._callOnce(client, model, decisionMsgs, [...opts.tools!, NO_ACTION_TOOL], false, undefined, "required");
+      const toolCalls = rawCalls.filter((tc) => tc.type !== "function" || tc.function.name !== "no_action");
       if (toolCalls.length) {
         msgs.push({ role: "assistant", content: null, tool_calls: toolCalls });
         for (const tc of toolCalls) {
@@ -156,7 +176,13 @@ export class ChatEngine {
 
     // Phase 2 — DIALOGUE joueur, SANS tool (aucune fuite possible), streame vers le TTS si demande.
     const { text } = await this._callOnce(client, model, msgs, undefined, opts.stream === true, onDelta);
-    return text;
+    if (text.trim()) { return text; }
+
+    // Garde-fou : a temperature 0, Llama renvoie parfois un texte VIDE apres des messages tool
+    // (le PNJ "prend l'objet sans rien dire"). Une relance avec consigne explicite suffit.
+    msgs.push({ role: "system", content: "Ta reponse etait vide. Reponds au joueur MAINTENANT en 1-2 phrases courtes, dans ton role, en tenant compte des resultats d'outils ci-dessus." });
+    const retry = await this._callOnce(client, model, msgs, undefined, opts.stream === true, onDelta);
+    return retry.text;
   }
 
   private async _callOnce(
@@ -166,9 +192,10 @@ export class ChatEngine {
     tools: SdkTool[] | undefined,
     stream: boolean,
     onDelta?: (delta: string) => void,
+    toolChoice?: "required",
   ): Promise<{ text: string; toolCalls: SdkToolCall[] }> {
     if (stream) {
-      const s = await client.chat.completions.create({ model, messages: msgs, tools, stream: true });
+      const s = await client.chat.completions.create({ model, messages: msgs, tools, stream: true, temperature: 0, seed: 7 });
       let full = "";
       const acc: Record<number, { id: string; name: string; args: string }> = {};
       for await (const chunk of s) {
@@ -191,7 +218,7 @@ export class ChatEngine {
       return normalizeToolCalls(full, toolCalls);
     }
 
-    const res = await client.chat.completions.create({ model, messages: msgs, tools });
+    const res = await client.chat.completions.create({ model, messages: msgs, tools, temperature: 0, seed: 7, ...(toolChoice ? { tool_choice: toolChoice } : {}) });
     const m = res.choices[0]?.message;
     return normalizeToolCalls(m?.content ?? "", (m?.tool_calls ?? []) as SdkToolCall[]);
   }

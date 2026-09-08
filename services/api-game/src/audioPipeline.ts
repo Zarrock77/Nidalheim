@@ -7,8 +7,7 @@ import { CartesiaStreamingTTS } from "./providers/cartesia.js";
 import { ChatEngine } from "./providers/chatEngine.js";
 import { buildSystemPrompt } from "./systemPrompt.js";
 import { ConversationStore } from "./conversationStore.js";
-import { MISSION_VALIDATE_TOOL, MISSION_START_TOOL } from "./missionCatalog.js";
-import { handleValidateMission, handleStartMission } from "./missionTool.js";
+import { applyDeterministicMissionActions } from "./missionTool.js";
 import { acquireMissionState, releaseMissionState, type MissionState } from "./missionState.js";
 import type { AuthenticatedUser, ChatMessage, Npc } from "./types.js";
 
@@ -298,39 +297,23 @@ export class AudioPipeline {
     } catch (err) {
       console.error(`[pipeline ${this.user.username}/${this.npc.id}] history load failed:`, (err as Error)?.message ?? err);
     }
-    const missions = this.missionState.all();
+    // Regles DETERMINISTES : le CODE confie/valide les epreuves (garanties demo), le LLM annonce.
+    const actions = applyDeterministicMissionActions(this.missionState);
+    for (const ev of actions.events) {
+      this._send({ ...ev });
+      console.log(`[pipeline ${this.user.username}/${this.npc.id}] ${ev.type} ${ev.missionId ?? "-"} (auto)`);
+    }
+
     const messages = [
-      { role: "system" as const, content: buildSystemPrompt(this.npc, missions, this.missionState.getInventory()) },
+      { role: "system" as const, content: buildSystemPrompt(this.npc, this.missionState.all(), this.missionState.getInventory()) },
       ...history,
       { role: "user" as const, content: userText },
+      ...actions.notes.map((n) => ({ role: "system" as const, content: n })),
     ];
 
     try {
       const full = await this.engine.respond(messages, {
         stream: true,
-        // Tool expose UNIQUEMENT quand il peut servir : mission active + objet en main (cas ou la
-        // validation peut reussir). Sinon aucun tool -> le prompt gere le dialogue (et zero fuite).
-        tools: [
-          ...(missions.some((m) => !m.completed && !m.started) ? [MISSION_START_TOOL] : []),
-          ...(missions.some((m) => !m.completed && (m.hasObjectiveItem || this.missionState.hasItem(m.objectiveItemId))) ? [MISSION_VALIDATE_TOOL] : []),
-        ],
-        onToolCall: async (name, argumentsJson) => {
-          if (name === "start_mission") {
-            const outcome = handleStartMission(this.missionState, argumentsJson);
-            if (outcome.started) {
-              this._send({ type: "mission_started", missionId: outcome.missionId });
-            }
-            console.log(`[pipeline /] start_mission  -> started=`);
-            return outcome.toolResult;
-          }
-          if (name === "validate_mission") {
-            const outcome = handleValidateMission(this.missionState, argumentsJson);
-            this._send({ type: "mission_validation_result", missionId: outcome.missionId, ok: outcome.ok });
-            console.log(`[pipeline ${this.user.username}/${this.npc.id}] validate_mission ${outcome.missionId ?? "-"} -> ok=${outcome.ok}`);
-            return outcome.toolResult;
-          }
-          return `tool inconnu: ${name}`;
-        },
         onDelta: (delta) => {
           if (!firstTokenAt) {
             firstTokenAt = Date.now();

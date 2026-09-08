@@ -134,3 +134,54 @@ export function handleStartMission(state: MissionState, argsJson: string): Start
     started: true,
   };
 }
+
+export interface DeterministicEvent {
+  type: "mission_validation_result" | "mission_started";
+  missionId: string | null;
+  ok?: boolean;
+}
+
+export interface DeterministicActions {
+  events: DeterministicEvent[];
+  notes: string[];
+}
+
+/**
+ * Regles DETERMINISTES evaluees a CHAQUE message du joueur — le CODE decide, le LLM raconte :
+ *  1. epreuve CONFIEE dont l'objet est dans l'inventaire (fouille) -> VALIDEE maintenant ;
+ *  2. epreuve PAS ENCORE CONFIEE -> CONFIEE maintenant.
+ * Les events partent au client (HUD + declenchement d'expansion) ; les notes systeme sont
+ * ajoutees au prompt pour que le PNJ ANNONCE ce qui vient d'arriver. Aucune de ces decisions
+ * ne depend du LLM : garanties demandees par Melvyn pour la demo.
+ */
+export function applyDeterministicMissionActions(state: MissionState): DeterministicActions {
+  const events: DeterministicEvent[] = [];
+  const notes: string[] = [];
+
+  for (const m of state.all()) {
+    if (m.started && !m.completed && (m.hasObjectiveItem || state.hasItem(m.objectiveItemId))) {
+      const outcome = handleValidateMission(state, JSON.stringify({ missionId: m.id }));
+      if (outcome.ok) {
+        events.push({ type: "mission_validation_result", missionId: outcome.missionId, ok: true });
+        notes.push(
+          `NOTE SYSTEME : tu as fouille le joueur, il porte bien l'objet de l'epreuve "${m.name}" : ` +
+          `elle est OFFICIELLEMENT VALIDEE et tu prends l'objet. Annonce-le lui clairement en 1-2 phrases.`,
+        );
+      }
+    }
+  }
+
+  const pending = state.all().find((m) => !m.started && !m.completed);
+  if (pending) {
+    const outcome = handleStartMission(state, JSON.stringify({ missionId: pending.id }));
+    if (outcome.started) {
+      events.push({ type: "mission_started", missionId: outcome.missionId });
+      notes.push(
+        `NOTE SYSTEME : tu viens de CONFIER OFFICIELLEMENT l'epreuve "${pending.name}" au joueur. ` +
+        `Presente-la lui MAINTENANT en 1-2 phrases courtes. Objectif : ${pending.objectiveDescription}`,
+      );
+    }
+  }
+
+  return { events, notes };
+}
