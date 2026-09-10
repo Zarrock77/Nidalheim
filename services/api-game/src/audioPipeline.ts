@@ -13,6 +13,7 @@ import { acquireMissionState, releaseMissionState, type MissionState } from "./m
 import type { AuthenticatedUser, ChatMessage, Npc } from "./types.js";
 
 const KEEPALIVE_INTERVAL_MS = 8000;
+export const INPUT_FINALIZATION_TIMEOUT_MS = 5000;
 
 export interface AudioPipelineConfig {
   deepgramKey?: string;
@@ -82,6 +83,12 @@ export class AudioPipeline {
   private activeSpeech: SpeechTurn | null = null;
   private pendingTranscript = "";
   private commitRequested = false;
+  private inputTurnId = 0;
+  private inputOpen = false;
+  private inputStartSeconds = 0;
+  private finalizationTimer: NodeJS.Timeout | null = null;
+  private readonly queuedInput: Array<Buffer | null> = [];
+  private queuedInputBytes = 0;
   private disposed = false;
   private keepAliveTimer: NodeJS.Timeout | null = null;
   private _audioChunks = 0;
@@ -112,37 +119,43 @@ export class AudioPipeline {
 
   async start(): Promise<void> {
     this.stt.onInterim = (text) => {
+      if (!this.inputOpen || this.disposed) return;
       this._send({ type: "user_transcript_partial", data: text });
     };
 
-    this.stt.onFinal = (text, speechFinal) => {
-      this._send({ type: "user_transcript", data: text });
+    this.stt.onFinal = (text, speechFinal, info) => {
+      if (!this.inputOpen || this.disposed) return;
+      if (info.end !== null && info.end <= this.inputStartSeconds + 0.0001) return;
       const clean = text.trim();
       if (clean) {
+        this._send({ type: "user_transcript", data: text });
         this.pendingTranscript = this.pendingTranscript
           ? `${this.pendingTranscript} ${clean}`
           : clean;
       }
       console.log(`[pipeline ${this.user.username}] stt final: "${text}" speech_final=${speechFinal} commit=${this.commitRequested}`);
-      if ((speechFinal || this.commitRequested) && this.pendingTranscript) {
+      // PTT ends at COMMIT, not at a pause midway through a sentence.
+      // A final segment alone may precede the remaining words of this turn.
+      if (this.commitRequested && ((info.fromFinalize && info.end !== null) || this._inputAudioProcessed())) {
         this._flushUtterance();
       }
     };
 
     this.stt.onUtteranceEnd = () => {
-      if (this.commitRequested && this.pendingTranscript) {
+      if (this.commitRequested && this._inputAudioProcessed()) {
         this._flushUtterance();
       }
     };
 
     this.stt.onError = (err) => {
-      this._send({ type: "error", message: `speech-to-text: ${err?.message ?? err}` });
+      this._failInput(`speech-to-text: ${err?.message ?? err}`);
     };
 
     this._sttOpened = false;
 
     if (this.ttsRoute.persistent) {
       await this.ttsRoute.instance.start();
+      if (this.disposed) { this.ttsRoute.instance.close(); return; }
       console.log(`[pipeline ${this.user.username}] tts (persistent) ready`);
     }
 
@@ -153,7 +166,22 @@ export class AudioPipeline {
   }
 
   onClientAudio(pcm16Buffer: Buffer): void {
-    if (this.disposed) return;
+    if (this.disposed || !pcm16Buffer.length) return;
+    if (this.commitRequested) {
+      // Do not mix a new recording with STT results still closing the previous one.
+      this.queuedInputBytes += pcm16Buffer.length;
+      if (this.queuedInputBytes > this.stt.sampleRate * 2 * 15) {
+        this._failInput("Trop de paroles en attente. Reessayez dans un instant.");
+        return;
+      }
+      this.queuedInput.push(pcm16Buffer);
+      return;
+    }
+    if (!this.inputOpen) {
+      this.inputOpen = true;
+      this.inputTurnId++;
+      this.inputStartSeconds = this.stt.audioSecondsSent;
+    }
     this._audioChunks++;
     this._audioBytes += pcm16Buffer.length;
     if (this._audioChunks === 1 || this._audioChunks % 100 === 0) {
@@ -180,14 +208,46 @@ export class AudioPipeline {
 
   onClientCommit(): void {
     if (this.disposed) return;
+    if (this.commitRequested) {
+      if (this.queuedInput.length && this.queuedInput[this.queuedInput.length - 1] !== null) {
+        this.queuedInput.push(null);
+      }
+      return;
+    }
+    if (!this.inputOpen) return;
     console.log(`[pipeline ${this.user.username}] commit received (chunks so far: ${this._audioChunks})`);
     this.commitRequested = true;
-    this.stt.finalize();
-    this._audioChunks = 0;
-    this._audioBytes = 0;
+    const turnId = this.inputTurnId;
+    this.finalizationTimer = setTimeout(() => {
+      if (this.commitRequested && this.inputTurnId === turnId) {
+        this._failInput("La transcription n'a pas pu se terminer. Reessayez votre phrase.");
+      }
+    }, INPUT_FINALIZATION_TIMEOUT_MS);
+    this._finalizeInput();
+  }
+
+  private _inputAudioProcessed(): boolean {
+    return this._sttOpened && this.stt.audioSecondsSent > 0
+      && this.stt.finalAudioSeconds + 0.0001 >= this.stt.audioSecondsSent;
+  }
+
+  private _finalizeInput(): void {
+    if (this.disposed || !this.commitRequested || !this._sttOpened) return;
+    if (this._inputAudioProcessed()) this._flushUtterance();
+    else if (!this.stt.finalize()) this._failInput("La reconnaissance vocale est deconnectee. Reessayez.");
+  }
+
+  private _failInput(message: string): void {
+    if (this.disposed) return;
+    console.error(`[pipeline ${this.user.username}] input turn ${this.inputTurnId} failed: ${message}`);
+    this._send({ type: "error", message });
+    // Reconnect starts a fresh STT timeline; old results cannot enter the next turn.
+    this.shutdown();
+    this.clientWs.close(1011, "speech input failed");
   }
 
   async onClientAudioConfig(msg: AudioConfigMessage): Promise<void> {
+    if (this.disposed) return;
     const rate = Number(msg?.sample_rate);
     if (!Number.isFinite(rate) || rate <= 0) return;
     const device = msg?.device || "(unknown)";
@@ -201,6 +261,7 @@ export class AudioPipeline {
         this._sttOpened = true;
         console.log(`[pipeline ${this.user.username}] Deepgram opened at ${rate} Hz`);
       } else if (rate !== this.stt.sampleRate) {
+        if (this.inputOpen) { this._failInput("Le format du microphone a change. Reessayez."); return; }
         console.log(`[pipeline ${this.user.username}] reconfiguring Deepgram: ${this.stt.sampleRate} Hz -> ${rate} Hz`);
         await this.stt.reconfigure({ sampleRate: rate });
         console.log(`[pipeline ${this.user.username}] Deepgram reconfigured at ${rate} Hz`);
@@ -211,20 +272,38 @@ export class AudioPipeline {
       return;
     }
 
+    if (this.disposed) { this.stt.close(); return; }
+
     this._awaitingFirstConfig = false;
     if (this._preConfigBuffer && this._preConfigBuffer.length) {
       console.log(`[pipeline ${this.user.username}] flushing ${this._preConfigBuffer.length} pre-config audio chunks`);
       for (const buf of this._preConfigBuffer) this.stt.sendAudio(buf);
       this._preConfigBuffer = null;
     }
+    this._finalizeInput();
   }
 
   private _flushUtterance(): void {
+    if (!this.commitRequested || !this.inputOpen || this.disposed) return;
     const text = this.pendingTranscript;
+    if (this.finalizationTimer) clearTimeout(this.finalizationTimer);
+    this.finalizationTimer = null;
     this.pendingTranscript = "";
     this.commitRequested = false;
-    if (!text) return;
-    void this._handleUtterance(text);
+    this.inputOpen = false;
+    this._audioChunks = 0;
+    this._audioBytes = 0;
+    console.log(`[pipeline ${this.user.username}] input turn ${this.inputTurnId} finalized (${text.length} characters)`);
+    if (text) void this._handleUtterance(text);
+    else this._send({ type: "error", message: "Aucune parole reconnue. Reessayez votre phrase." });
+    while (this.queuedInput.length && !this.commitRequested && !this.disposed) {
+      const next = this.queuedInput.shift()!;
+      if (next === null) this.onClientCommit();
+      else {
+        this.queuedInputBytes -= next.length;
+        this.onClientAudio(next);
+      }
+    }
   }
 
   private async _handleUtterance(userText: string): Promise<void> {
@@ -307,6 +386,14 @@ export class AudioPipeline {
   shutdown(): void {
     if (this.disposed) return;
     this.disposed = true;
+    if (this.finalizationTimer) clearTimeout(this.finalizationTimer);
+    this.finalizationTimer = null;
+    this.queuedInput.length = 0;
+    this.queuedInputBytes = 0;
+    this._preConfigBuffer = null;
+    this.pendingTranscript = "";
+    this.commitRequested = false;
+    this.inputOpen = false;
     this.pendingUtterances = [];
     this.activeSpeech?.cancel();
     this.activeSpeech = null;

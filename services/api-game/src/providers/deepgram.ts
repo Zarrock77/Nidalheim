@@ -17,6 +17,14 @@ interface DeepgramTranscriptEvent {
   channel?: { alternatives?: Array<{ transcript?: string }> };
   is_final?: boolean;
   speech_final?: boolean;
+  from_finalize?: boolean;
+  start?: number;
+  duration?: number;
+}
+
+export interface FinalTranscriptInfo {
+  fromFinalize: boolean;
+  end: number | null;
 }
 
 export class DeepgramStreamingSTT {
@@ -26,9 +34,16 @@ export class DeepgramStreamingSTT {
   private readonly endpointingMs: number;
   private readonly utteranceEndMs: number;
   private live: ListenLiveClient | null = null;
+  private sentBytes = 0;
+  private processedSeconds = 0;
+  private readonly seenResults = new Set<string>();
+  private readonly seenSegments = new Set<string>();
+
+  get audioSecondsSent(): number { return this.sentBytes / (this.sampleRate * 2); }
+  get finalAudioSeconds(): number { return this.processedSeconds; }
 
   onInterim: (text: string) => void = () => {};
-  onFinal: (text: string, speechFinal: boolean) => void = () => {};
+  onFinal: (text: string, speechFinal: boolean, info: FinalTranscriptInfo) => void = () => {};
   onUtteranceEnd: () => void = () => {};
   onError: (err: Error) => void = () => {};
 
@@ -50,6 +65,10 @@ export class DeepgramStreamingSTT {
   }
 
   async start(): Promise<void> {
+    this.sentBytes = 0;
+    this.processedSeconds = 0;
+    this.seenResults.clear();
+    this.seenSegments.clear();
     const liveOptions: LiveSchema = {
       model: "nova-3",
       language: this.language,
@@ -72,6 +91,7 @@ export class DeepgramStreamingSTT {
     });
 
     live.on(LiveTranscriptionEvents.Error, (err: Error) => {
+      if (this.live !== live) return;
       console.error("[deepgram error]", err);
       this.onError(err);
     });
@@ -85,20 +105,37 @@ export class DeepgramStreamingSTT {
     }
 
     live.on(LiveTranscriptionEvents.Transcript, (event: DeepgramTranscriptEvent) => {
+      if (this.live !== live) return;
       const rawPreview = JSON.stringify(event).slice(0, 400);
       if (!event?.channel?.alternatives?.[0]?.transcript) {
         console.log("[dg Transcript empty]", rawPreview);
       }
-      const text = event?.channel?.alternatives?.[0]?.transcript ?? "";
-      if (!text) return;
+      let text = event?.channel?.alternatives?.[0]?.transcript ?? "";
       if (event.is_final) {
-        this.onFinal(text, !!event.speech_final);
-      } else {
+        // Empty final results still carry completion of the audio stream.
+        // Keep boundaries separate from words, and don't append replayed segments.
+        if (Number.isFinite(event.start) && Number.isFinite(event.duration)) {
+          const key = JSON.stringify([event.start, event.duration, text]);
+          const resultKey = JSON.stringify([key, !!event.speech_final, !!event.from_finalize]);
+          if (this.seenResults.has(resultKey)) return;
+          this.seenResults.add(resultKey);
+          if (this.seenSegments.has(key)) text = "";
+          this.seenSegments.add(key);
+          this.processedSeconds = Math.max(this.processedSeconds, event.start! + event.duration!);
+          for (const set of [this.seenResults, this.seenSegments]) {
+            if (set.size > 256) set.delete(set.values().next().value!);
+          }
+        }
+        const end = Number.isFinite(event.start) && Number.isFinite(event.duration)
+          ? event.start! + event.duration! : null;
+        this.onFinal(text, !!event.speech_final, { fromFinalize: !!event.from_finalize, end });
+      } else if (text) {
         this.onInterim(text);
       }
     });
 
     live.on(LiveTranscriptionEvents.UtteranceEnd, () => {
+      if (this.live !== live) return;
       this.onUtteranceEnd();
     });
   }
@@ -110,13 +147,15 @@ export class DeepgramStreamingSTT {
     // Deepgram's TS `send` signature wants ArrayBuffer/Blob; at runtime it
     // accepts Node Buffers (which are Uint8Arrays). Cast through unknown.
     (this.live as unknown as { send: (data: unknown) => void }).send(pcm16Buffer);
+    this.sentBytes += pcm16Buffer.length;
   }
 
-  finalize(): void {
-    if (!this.live) return;
+  finalize(): boolean {
+    if (!this.live || this.live.getReadyState() !== 1) return false;
     try {
       this.live.send(JSON.stringify({ type: "Finalize" }));
-    } catch { /* ignore */ }
+      return true;
+    } catch { return false; }
   }
 
   keepAlive(): void {
