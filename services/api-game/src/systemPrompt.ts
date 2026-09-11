@@ -1,5 +1,5 @@
 import type { Npc } from "./types.js";
-import type { ClientMission, ClientInventoryItem } from "./missionState.js";
+import { DEFAULT_PLAYER_PROGRESS, type ClientMission, type ClientInventoryItem, type ClientPlayerProgress } from "./missionState.js";
 
 /**
  * System prompt envoye au LLM — IDENTIQUE pour le chat texte et le chat vocal.
@@ -13,6 +13,7 @@ export function buildSystemPrompt(
   npc: Npc,
   missions: ClientMission[],
   inventory: ClientInventoryItem[] = [],
+  player: ClientPlayerProgress = DEFAULT_PLAYER_PROGRESS,
 ): string {
   const lines = [
     npc.systemPrompt,
@@ -62,6 +63,16 @@ export function buildSystemPrompt(
       }
     }
   }
+
+  // Progression : le PNJ jauge le voyageur d'un coup d'oeil. Sert a calibrer le TON (on ne parle
+  // pas pareil a un debutant et a un veteran), jamais a inventer une epreuve hors de la liste.
+  lines.push(
+    "",
+    `AGUERRISSEMENT DU JOUEUR : niveau ${player.level} sur ${player.maxLevel} (tu le jauges d'un coup d'oeil, a son port et a ses cicatrices).`,
+    "- Adapte ton TON a ce niveau : prudent et protecteur avec un debutant, direct et respectueux avec un aguerri.",
+    "- Si une epreuve te parait au-dessus de ses moyens, previens-le clairement ; ne la lui retire pas pour autant.",
+    "- N'annonce jamais ce niveau comme un chiffre : parle d'experience, d'allure, de ce que tu devines de lui.",
+  );
 
   // Fouille : le PNJ (ancien du village, il a eu affaire aux occupants du donjon) voit TOUT ce que
   // porte le joueur. Les objets marques [butin du donjon] sont les seuls qu'il peut confisquer ;

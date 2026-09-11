@@ -11,7 +11,7 @@ import { getNpc } from "./npcStore.js";
 import { ChatEngine } from "./providers/chatEngine.js";
 import { buildSystemPrompt } from "./systemPrompt.js";
 import { applyDeterministicMissionActions } from "./missionTool.js";
-import { acquireMissionState, releaseMissionState, parseMissionSync, parseInventorySync, type MissionState } from "./missionState.js";
+import { acquireMissionState, releaseMissionState, parseMissionSync, parseInventorySync, parsePlayerSync, type MissionState } from "./missionState.js";
 import { generateDungeonExtension, type CatalogItem } from "./dungeonExpansion.js";
 import { QuestGenerator } from "./questGenerator.js";
 import { registerQuestRoutes } from "./questRoutes.js";
@@ -88,7 +88,7 @@ async function handleTextConnection(
     }
 
     const messages = [
-      { role: "system" as const, content: buildSystemPrompt(npc, missionState.all(), missionState.getInventory()) },
+      { role: "system" as const, content: buildSystemPrompt(npc, missionState.all(), missionState.getInventory(), missionState.getPlayer()) },
       ...history,
       { role: "user" as const, content: userText },
       ...actions.notes.map((n) => ({ role: "system" as const, content: n })),
@@ -147,6 +147,14 @@ function handleTextControlMessage(
     const missions = parseMissionSync(ctrl as { missions?: unknown });
     missionState.replaceAll(missions);
     console.log(`[text ${user.username}/${npc.id}] mission_sync -> ${missions.length} mission(s)`);
+    return true;
+  }
+
+  if (ctrl.type === "player_sync") {
+    // Progression : le client pousse le niveau du joueur (connexion + chaque montee de niveau).
+    const player = parsePlayerSync(ctrl as { level?: unknown; maxLevel?: unknown });
+    missionState.replacePlayer(player);
+    console.log(`[text ${user.username}/${npc.id}] player_sync -> niveau ${player.level}/${player.maxLevel}`);
     return true;
   }
 

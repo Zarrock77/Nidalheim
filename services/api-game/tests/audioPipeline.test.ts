@@ -38,7 +38,7 @@ jest.unstable_mockModule("../src/conversationStore.js", () => ({ ConversationSto
   loadRecent = async () => []; appendTurn = appendTurn;
 } }));
 jest.unstable_mockModule("../src/missionState.js", () => ({
-  acquireMissionState: () => ({ all: () => [], getInventory: () => [] }), releaseMissionState: () => {},
+  acquireMissionState: () => ({ all: () => [], getInventory: () => [], getPlayer: () => ({ level: 1, maxLevel: 1 }) }), releaseMissionState: () => {},
 }));
 jest.unstable_mockModule("../src/missionTool.js", () => ({ applyDeterministicMissionActions: () => ({ events: [], notes: [] }) }));
 jest.unstable_mockModule("../src/systemPrompt.js", () => ({ buildSystemPrompt: () => "NPC test" }));

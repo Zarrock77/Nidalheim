@@ -27,10 +27,23 @@ export interface ClientInventoryItem {
   lore: string;
 }
 
-/** Etat missions + inventaire d'un joueur pour un PNJ donne. Ephemere : le client re-sync. */
+/**
+ * Progression du joueur poussee par le client via `player_sync`.
+ * Sert au PNJ a calibrer ce qu'il propose : on n'envoie pas un niveau 2 nettoyer une taniere.
+ */
+export interface ClientPlayerProgress {
+  level: number;
+  maxLevel: number;
+}
+
+/** Valeur par defaut tant que le client n'a pas envoye de `player_sync`. */
+export const DEFAULT_PLAYER_PROGRESS: ClientPlayerProgress = { level: 1, maxLevel: 1 };
+
+/** Etat missions + inventaire + progression d'un joueur pour un PNJ donne. Ephemere : le client re-sync. */
 export class MissionState {
   private missions: ClientMission[] = [];
   private inventory: ClientInventoryItem[] = [];
+  private player: ClientPlayerProgress = { ...DEFAULT_PLAYER_PROGRESS };
 
   replaceAll(missions: ClientMission[]): void {
     this.missions = missions;
@@ -55,6 +68,14 @@ export class MissionState {
 
   getInventory(): ClientInventoryItem[] {
     return this.inventory;
+  }
+
+  replacePlayer(player: ClientPlayerProgress): void {
+    this.player = player;
+  }
+
+  getPlayer(): ClientPlayerProgress {
+    return this.player;
   }
 
   /** Le joueur porte-t-il cet item (inventaire sync) ? Verification generique de la fouille. */
@@ -104,6 +125,16 @@ export function parseInventorySync(raw: { items?: unknown }): ClientInventoryIte
     });
   }
   return out;
+}
+
+/** Parse + valide un payload `player_sync` du client (progression). */
+export function parsePlayerSync(raw: { level?: unknown; maxLevel?: unknown }): ClientPlayerProgress {
+  const toLevel = (v: unknown, fallback: number): number =>
+    typeof v === "number" && Number.isFinite(v) ? Math.max(1, Math.floor(v)) : fallback;
+  const level = toLevel(raw?.level, DEFAULT_PLAYER_PROGRESS.level);
+  // maxLevel ne peut pas etre sous le niveau courant : un client incoherent ne doit pas produire
+  // un prompt du type "niveau 12 sur 1".
+  return { level, maxLevel: Math.max(level, toLevel(raw?.maxLevel, DEFAULT_PLAYER_PROGRESS.maxLevel)) };
 }
 
 // --- Registre partage par (userId, npcId) -------------------------------------------------
