@@ -339,7 +339,7 @@ export class AudioPipeline {
         console.log(`[pipeline ${this.user.username}/${this.npc.id}] ${ev.type} ${ev.missionId ?? "-"} (auto)`);
       }
       const messages = [
-        { role: "system" as const, content: buildSystemPrompt(this.npc, this.missionState.all(), this.missionState.getInventory()) },
+        { role: "system" as const, content: buildSystemPrompt(this.npc, this.missionState.all(), this.missionState.getInventory(), this.missionState.getPlayer()) },
         ...history,
         { role: "user" as const, content: userText },
         ...actions.notes.map((n) => ({ role: "system" as const, content: n })),
